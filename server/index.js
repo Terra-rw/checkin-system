@@ -370,16 +370,16 @@ admin.post('/test-email', async (req, res) => {
   const s = getSettings();
   const to = alertRecipients(s);
   if (to.length === 0) throw new HttpError(400, 'Add at least one alert email in Settings first.');
-  const sent = await sendMail({
+  const result = await sendMail({
     to,
     subject: 'Check-in system: test email',
     text: `This is a test email from the check-in system, requested by ${req.user.name}.`,
   });
-  res.json({
-    message: sent
-      ? `Test email sent to ${to.join(', ')}.`
-      : 'SMTP is not configured; the email was printed in the server console instead.',
-  });
+  if (result.sent) return res.json({ message: `Test email sent to ${to.join(', ')}.` });
+  if (!smtpConfigured) {
+    return res.json({ message: 'SMTP is not configured; the email was printed in the server console instead.' });
+  }
+  throw new HttpError(502, `Sending failed: ${result.error}. Check the SMTP settings and the server logs.`);
 });
 
 app.use('/api/admin', admin);

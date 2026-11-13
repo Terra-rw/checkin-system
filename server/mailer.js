@@ -5,6 +5,9 @@ const transporter = process.env.SMTP_HOST
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT || 587),
       secure: process.env.SMTP_SECURE === 'true', // true for port 465
+      // On other ports (587, 2525) insist on STARTTLS so the password is never sent unencrypted.
+      requireTLS: process.env.SMTP_SECURE !== 'true',
+      connectionTimeout: 20000,
       auth: process.env.SMTP_USER
         ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
         : undefined,
@@ -17,15 +20,18 @@ if (!transporter) {
 
 /**
  * Sends an email. Never throws: a mail failure must not block a check-in.
- * Returns true when the message was handed to the SMTP server.
+ * Returns { sent: true } when the SMTP server accepted it, otherwise { sent: false, error }.
  */
 export async function sendMail({ to, subject, text }) {
   const recipients = [...new Set(to.map((e) => e && e.trim()).filter(Boolean))];
-  if (recipients.length === 0) return false;
+  if (recipients.length === 0) {
+    console.warn(`[email] Not sent ("${subject}"): no recipients. Add alert emails in Admin > Settings.`);
+    return { sent: false, error: 'No recipients.' };
+  }
 
   if (!transporter) {
     console.log(`\n[email:console] To: ${recipients.join(', ')}\nSubject: ${subject}\n\n${text}\n`);
-    return false;
+    return { sent: false, error: null };
   }
 
   try {
@@ -35,10 +41,10 @@ export async function sendMail({ to, subject, text }) {
       subject,
       text,
     });
-    return true;
+    return { sent: true };
   } catch (err) {
     console.error('[email] Failed to send:', err.message);
-    return false;
+    return { sent: false, error: err.message };
   }
 }
 
