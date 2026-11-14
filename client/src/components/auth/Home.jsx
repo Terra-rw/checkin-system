@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, navigate, getLastInstitution, initials } from '../../api.js';
+import { api, navigate, getLastInstitution } from '../../api.js';
+import Logo from '../Logo.jsx';
 
 /** "/" — people search for their institution by name or code. */
 export default function Home() {
@@ -50,7 +51,7 @@ export default function Home() {
 
         {recent && (
           <button className="inst-option recent" onClick={() => go(recent.code)}>
-            <span className="logo">{initials(recent.name)}</span>
+            <Logo inst={recent} size={40} />
             <span className="inst-text">
               <span className="muted small">Continue to</span>
               <span className="strong">{recent.name}</span>
@@ -91,7 +92,7 @@ export default function Home() {
               {results.map((r) => (
                 <li key={r.code}>
                   <button type="button" className="inst-option" onClick={() => go(r.code)}>
-                    <span className="logo">{initials(r.name)}</span>
+                    <Logo inst={r} size={36} />
                     <span className="inst-text">
                       <span className="strong">{r.name}</span>
                       <span className="muted small">

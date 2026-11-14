@@ -114,6 +114,65 @@ export async function download(path) {
   return name;
 }
 
+/** Uploads an image blob as the raw request body. */
+export async function uploadImage(path, blob) {
+  const token = currentScope && getSession(currentScope)?.token;
+  const res = await fetch(`/api${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': blob.type, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: blob,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (res.status === 413 ? 'That image is too large.' : `Upload failed (${res.status})`));
+  return data;
+}
+
+const IMAGE_RULES = {
+  logo: { maxFile: 1, maxSide: 512, minSide: 128, type: 'image/png' },
+  photo: { maxFile: 5, maxSide: 1920, minSide: 800, type: 'image/jpeg' },
+};
+
+/**
+ * Checks a chosen file and shrinks it in the browser before upload:
+ * logos become PNG (keeps transparency) at most 512 px, photos JPEG at most 1920 px.
+ * Re-drawing also strips hidden metadata such as the GPS location in phone photos.
+ */
+export async function prepareImage(file, kind) {
+  const rule = IMAGE_RULES[kind];
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Choose a PNG, JPG or WebP image.');
+  if (file.size > rule.maxFile * 1024 * 1024) throw new Error(`That file is over ${rule.maxFile} MB. Choose a smaller one.`);
+
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error("That image couldn't be opened."));
+      el.src = url;
+    });
+    const { naturalWidth: w, naturalHeight: h } = img;
+    const shortSide = kind === 'logo' ? Math.min(w, h) : w;
+    if (shortSide < rule.minSide) {
+      throw new Error(kind === 'logo' ? `The logo is too small (${w} × ${h} px). Use at least ${rule.minSide} px.` : `The photo is too small (${w} px wide). Use at least ${rule.minSide} px.`);
+    }
+    const scale = Math.min(1, rule.maxSide / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * scale);
+    canvas.height = Math.round(h * scale);
+    const ctx = canvas.getContext('2d');
+    if (rule.type === 'image/jpeg') {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, rule.type, 0.85));
+    if (!blob) throw new Error("That image couldn't be processed.");
+    return { blob, previewUrl: URL.createObjectURL(blob), width: canvas.width, height: canvas.height, name: file.name };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // ------------------------------------------------------------------ location
 
 /** Asks the browser for a fresh, high-accuracy GPS fix. */

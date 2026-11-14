@@ -1,4 +1,5 @@
 import { db } from './db.js';
+import { filePath } from './media.js';
 import { localParts, formatTime, formatDuration, weekdayOf, dateRange } from './time.js';
 
 export const REPORT_TYPES = {
@@ -119,9 +120,9 @@ export function buildReport(inst, s, { type = 'summary', from, to, userId }) {
       { key: 'email', label: 'Email', type: 'text', width: 28 },
       { key: 'present', label: 'Present', type: 'number', width: 10 },
       { key: 'absent', label: 'Absent', type: 'number', width: 10 },
-      { key: 'lateDays', label: 'Late days', type: 'number', width: 10 },
+      { key: 'lateDays', label: 'Late days', type: 'number', width: 12 },
       { key: 'lateMin', label: 'Total late', type: 'duration', width: 14 },
-      { key: 'earlyCount', label: 'Left early', type: 'number', width: 10 },
+      { key: 'earlyCount', label: 'Left early', type: 'number', width: 12 },
       { key: 'workedMin', label: 'Hours worked', type: 'duration', width: 16 },
     ];
     rows = summary;
@@ -134,6 +135,7 @@ export function buildReport(inst, s, { type = 'summary', from, to, userId }) {
     type,
     title: REPORT_TYPES[type],
     institution: inst.name,
+    logoPath: filePath(inst.logo_file),
     officeName: s.officeName,
     timezone: s.timezone,
     from,
@@ -218,6 +220,14 @@ export async function toXlsx(report) {
     );
   }
   ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5, column: cols.length } };
+
+  // Logo at the top right, over the title rows.
+  if (report.logoPath) {
+    const lastVisible = cols.map((c) => c.mode).lastIndexOf('display');
+    const imageId = wb.addImage({ filename: report.logoPath, extension: report.logoPath.endsWith('.png') ? 'png' : 'jpeg' });
+    ws.getRow(1).height = 30;
+    ws.addImage(imageId, { tl: { col: lastVisible + 0.4, row: 0.1 }, ext: { width: 44, height: 44 }, editAs: 'oneCell' });
+  }
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
@@ -240,8 +250,17 @@ export async function toPdf(report, generatedBy) {
     const bottom = () => doc.page.height - doc.page.margins.bottom - 30;
 
     // Header
-    doc.fillColor('#17202a').font('Helvetica-Bold').fontSize(15).text(report.institution, left, 40);
-    doc.font('Helvetica').fontSize(10).fillColor(muted).text(report.officeName);
+    let nameX = left;
+    if (report.logoPath) {
+      try {
+        doc.image(report.logoPath, left, 36, { fit: [38, 38], align: 'center', valign: 'center' });
+        nameX = left + 48;
+      } catch {
+        /* unreadable image: fall back to the name only */
+      }
+    }
+    doc.fillColor('#17202a').font('Helvetica-Bold').fontSize(15).text(report.institution, nameX, 40);
+    doc.font('Helvetica').fontSize(10).fillColor(muted).text(report.officeName, nameX);
     doc.font('Helvetica-Bold').fontSize(17).fillColor('#17202a').text(report.title, left, 40, { width, align: 'right' });
     doc.font('Helvetica').fontSize(10).fillColor(muted).text(`${report.period} · ${report.workDayCount} work days`, { width, align: 'right' });
     doc.moveTo(left, 82).lineTo(left + width, 82).lineWidth(2).strokeColor(teal).stroke();

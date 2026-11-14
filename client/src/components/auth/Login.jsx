@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, navigate, getDeviceToken, setDeviceToken, setLastInstitution } from '../../api.js';
-import AuthBrand from './AuthBrand.jsx';
+import AuthBrand, { AuthPage } from './AuthBrand.jsx';
 
 export default function Login({ scope, institution, onLoggedIn }) {
   const isPlatform = scope === 'platform';
@@ -42,7 +42,7 @@ export default function Login({ scope, institution, onLoggedIn }) {
   }
 
   return (
-    <div className="center">
+    <AuthPage institution={institution}>
       <div className="auth-col">
         <AuthBrand scope={scope} institution={institution} />
         <form className="card stack-sm" onSubmit={submit}>
@@ -83,7 +83,7 @@ export default function Login({ scope, institution, onLoggedIn }) {
           </p>
         )}
       </div>
-    </div>
+    </AuthPage>
   );
 }
 
@@ -127,7 +127,7 @@ function VerifyCode({ scope, institution, challenge, onBack, onDone }) {
   }
 
   return (
-    <div className="center">
+    <AuthPage institution={institution}>
       <div className="auth-col">
         <AuthBrand scope={scope} institution={institution} compact />
         <div className="center-text stack-sm">
@@ -183,7 +183,7 @@ function VerifyCode({ scope, institution, challenge, onBack, onDone }) {
           Use a different account
         </button>
       </div>
-    </div>
+    </AuthPage>
   );
 }
 

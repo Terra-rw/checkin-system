@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'data.db');
+export const dbPath = process.env.DB_PATH || path.join(__dirname, 'data.db');
 
 export const db = new DatabaseSync(dbPath);
 db.exec('PRAGMA journal_mode = WAL;');
@@ -180,6 +180,18 @@ function migrate() {
         PRAGMA user_version = 2;
       `);
     });
+  }
+
+  if (db.prepare('PRAGMA user_version').get().user_version < 3) {
+    // Branding: uploaded files live in UPLOAD_DIR; only their generated names are stored here.
+    db.exec(`
+      ALTER TABLE institutions ADD COLUMN logo_file TEXT;
+      ALTER TABLE institutions ADD COLUMN photo_file TEXT;
+      ALTER TABLE institutions ADD COLUMN photo_focus_x REAL NOT NULL DEFAULT 50;
+      ALTER TABLE institutions ADD COLUMN photo_focus_y REAL NOT NULL DEFAULT 50;
+      ALTER TABLE institutions ADD COLUMN photo_dim INTEGER NOT NULL DEFAULT 1;
+      PRAGMA user_version = 3;
+    `);
   }
 
   db.exec('PRAGMA foreign_keys = ON;');

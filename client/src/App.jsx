@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, getSession, setSession, setScope, parseRoute, navigate, initials } from './api.js';
+import { api, getSession, setSession, setScope, parseRoute, navigate } from './api.js';
 import Home from './components/auth/Home.jsx';
 import Login from './components/auth/Login.jsx';
 import Forgot from './components/auth/Forgot.jsx';
@@ -7,6 +7,7 @@ import SetPassword from './components/auth/SetPassword.jsx';
 import EmployeeView from './components/EmployeeView.jsx';
 import AdminView from './components/AdminView.jsx';
 import PlatformView from './components/PlatformView.jsx';
+import Logo from './components/Logo.jsx';
 
 export default function App() {
   const [route, setRoute] = useState(parseRoute);
@@ -122,7 +123,7 @@ function InstitutionApp({ scope, me, refresh, onLogout }) {
 
   return (
     <Shell
-      brand={{ initials: initials(me.institution.name), name: me.institution.name }}
+      brand={{ inst: me.institution, name: me.institution.name }}
       user={me.user}
       tabs={tabs}
       view={view}
@@ -135,7 +136,7 @@ function InstitutionApp({ scope, me, refresh, onLogout }) {
           Support view: you are seeing {me.institution.name} as its admin. Everything you do is recorded in its security log.
         </div>
       )}
-      {view === 'me' || !isAdmin ? <EmployeeView me={me} onChange={refresh} /> : <AdminView me={me} tab={view} />}
+      {view === 'me' || !isAdmin ? <EmployeeView me={me} onChange={refresh} /> : <AdminView me={me} tab={view} onBrandingSaved={refresh} />}
     </Shell>
   );
 }
@@ -145,7 +146,7 @@ function Shell({ brand, user, tabs = [], view, onView, onLogout, logoutLabel = '
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="logo">{brand.initials}</span>
+          {brand.inst ? <Logo inst={brand.inst} size={30} /> : <span className="logo">{brand.initials}</span>}
           <span className="brand-name">{brand.name}</span>
           {brand.tag && <span className="tag">{brand.tag}</span>}
         </div>
