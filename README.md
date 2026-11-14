@@ -76,6 +76,26 @@ Fill in the `SMTP_*` values in `server/.env`. Until you do, emails (including lo
 **printed in the server console**, which is useful for testing. On hosts that block the usual email ports
 (Render does), try port `2525` with `SMTP_SECURE=false`.
 
+## Testing
+
+```bash
+npm test          # from the project root: end-to-end tests on throwaway databases
+```
+
+- **API flow** (`server/test/api.test.mjs`): invites, email codes, check-in rules, reports, password reset,
+  lockout, branding, support access, suspension and search.
+- **Upgrade** (`server/test/migration.test.mjs`): a database in the original v1 format is migrated and keeps
+  its people, attendance and settings.
+- **Institution isolation** (`server/test/tenant-isolation.test.mjs`): every admin and platform route is tried
+  without login, as an employee, as another institution's admin and as a support session. The route list is
+  read from `index.js`, so adding an admin route without an isolation test makes the suite fail.
+
+Load benchmark (CPU and memory per kind of request; run it on the real server to size it):
+
+```bash
+npm run build && npm run bench --prefix server -- --employees 2000
+```
+
 ## Deploying
 
 ```bash
