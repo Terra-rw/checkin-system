@@ -52,6 +52,10 @@ The platform owner account is created on first start from `PLATFORM_OWNER_EMAIL`
 and exceptions only (late, early, absent). Each can be previewed, downloaded as **XLSX**, **CSV** or **PDF** (A4, with signature
 lines), or emailed to yourself. Admins can also turn on an automatic summary every Monday (Settings › Email alerts).
 
+Reports are built one at a time in a background worker thread, so check-ins and page loads stay fast while a big
+export runs. The worker has its own memory limit (`REPORT_WORKER_MEMORY_MB`, default 1024): a report that would need
+more fails with a clear message instead of crashing the server. PDFs are limited to 15,000 rows; use Excel or CSV for more.
+
 Durations of 60 minutes or more are shown as hours and minutes ("1 hr 25 min"). Excel and CSV files also include
 a minutes column so totals can still be added up.
 

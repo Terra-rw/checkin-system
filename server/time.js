@@ -3,11 +3,23 @@
 
 const WEEKDAYS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
+// Creating an Intl.DateTimeFormat is slow (~50 µs) and memory-hungry, so build one per
+// timezone and reuse it. Reports format two times per attendance row.
+const formatterCache = new Map();
+function formatter(kind, timeZone, options) {
+  const key = `${kind}|${timeZone}`;
+  let f = formatterCache.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat(kind === 'parts' ? 'en-US' : 'en-GB', { timeZone, ...options });
+    formatterCache.set(key, f);
+  }
+  return f;
+}
+
 /** Returns { date: 'YYYY-MM-DD', minutes: minutes since midnight, weekday: 0-6 } in `timeZone`. */
 export function localParts(date, timeZone) {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone,
+    formatter('parts', timeZone, {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -34,12 +46,7 @@ export function toMinutes(hhmm) {
 
 /** ISO timestamp -> '08:42' in `timeZone`. */
 export function formatTime(iso, timeZone) {
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).format(new Date(iso));
+  return formatter('time', timeZone, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
 }
 
 export function isValidTimeZone(tz) {
