@@ -3,12 +3,20 @@ import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMainThread } from 'node:worker_threads';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const dbPath = process.env.DB_PATH || path.join(__dirname, 'data.db');
 
-export const db = new DatabaseSync(dbPath);
-db.exec('PRAGMA journal_mode = WAL;');
+// The main thread owns the database: it runs migrations and does all writes.
+// Worker threads (the report builder) open a read-only connection and never migrate.
+const readOnly = !isMainThread;
+
+export const db = new DatabaseSync(dbPath, { readOnly });
+// If the database is briefly locked (e.g. a checkpoint while a report reads), wait up to
+// 5 s instead of failing the request with SQLITE_BUSY.
+db.exec('PRAGMA busy_timeout = 5000;');
+if (!readOnly) db.exec('PRAGMA journal_mode = WAL;');
 
 /** Runs `fn` inside a transaction. */
 export function tx(fn) {
@@ -205,7 +213,7 @@ export function normalizeCode(code) {
     .replace(/^-+|-+$/g, '');
 }
 
-migrate();
+if (!readOnly) migrate();
 
 // ---------------------------------------------------------------- settings (per institution)
 

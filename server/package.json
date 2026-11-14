@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env index.js",
     "start": "node --env-file-if-exists=.env index.js",
-    "demo": "node scripts/demo.js"
+    "demo": "node scripts/demo.js",
+    "test": "node test/run.mjs",
+    "bench": "node test/load/bench.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
