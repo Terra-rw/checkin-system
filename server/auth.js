@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { db, getSettings, logEvent, normalizeCode, tx } from './db.js';
 import { sendMail } from './mailer.js';
 import { formatTime } from './time.js';
+import { mediaUrl } from './media.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -47,7 +48,17 @@ export const publicUser = (u) => ({
   active: !!u.active,
   invitePending: !u.password_hash,
 });
-export const publicInstitution = (i) => i && { id: i.id, name: i.name, code: i.code, status: i.status };
+export const publicInstitution = (i) =>
+  i && {
+    id: i.id,
+    name: i.name,
+    code: i.code,
+    status: i.status,
+    logoUrl: mediaUrl(i.logo_file),
+    photoUrl: mediaUrl(i.photo_file),
+    photoFocus: { x: i.photo_focus_x ?? 50, y: i.photo_focus_y ?? 50 },
+    photoDim: i.photo_dim !== 0,
+  };
 
 export function validatePassword(p) {
   if (typeof p !== 'string' || p.length < MIN_PASSWORD) {
@@ -123,7 +134,7 @@ function lockUser(user, inst, reason) {
   logEvent(inst?.id, user.id, 'locked', `${reason} for ${user.email}. Locked for ${LOCK_MINUTES} min.`);
   sendMail({
     to: [user.email],
-    fromName: inst?.name,
+    brand: inst,
     subject: 'Your check-in account was locked',
     text:
       `Hi ${user.name},\n\n${reason}, so your account is locked for ${LOCK_MINUTES} minutes.\n\n` +
@@ -159,7 +170,7 @@ function sendCode(challengeId, user, inst, label) {
   const when = `${formatTime(new Date(), s.timezone)} (${s.timezone})`;
   sendMail({
     to: [user.email],
-    fromName: inst?.name,
+    brand: inst,
     subject: `${code} is your ${inst ? inst.name + ' ' : ''}check-in code`,
     text:
       `Hi ${user.name},\n\nEnter this code to finish logging in on a new device:\n\n    ${code}\n\n` +
@@ -192,7 +203,7 @@ export function sendPasswordLink(req, user, inst, kind) {
   if (kind === 'invite') {
     return sendMail({
       to: [user.email],
-      fromName: inst?.name,
+      brand: inst,
       subject: `You've been invited to ${where} check-in`,
       text:
         `Hi ${user.name},\n\nAn account has been created for you on ${where}'s check-in system.\n` +
@@ -201,7 +212,7 @@ export function sendPasswordLink(req, user, inst, kind) {
   }
   return sendMail({
     to: [user.email],
-    fromName: inst?.name,
+    brand: inst,
     subject: `Reset your ${inst ? inst.name + ' ' : ''}check-in password`,
     text:
       `Hi ${user.name},\n\nSomeone asked to reset the password for ${user.email}. If it was you, choose a new password here:\n\n` +
@@ -290,13 +301,13 @@ authRouter.get('/institutions', (req, res) => {
   const like = `%${q.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
   const rows = db
     .prepare(
-      `SELECT name, code FROM institutions
+      `SELECT name, code, logo_file FROM institutions
        WHERE status = 'active' AND (lower(name) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')
        ORDER BY CASE WHEN lower(name) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, name COLLATE NOCASE
        LIMIT 8`,
     )
     .all(like, like, `${like.slice(1)}`, `${like.slice(1)}`);
-  res.json(rows.map((r) => ({ name: r.name, code: r.code })));
+  res.json(rows.map((r) => ({ name: r.name, code: r.code, logoUrl: mediaUrl(r.logo_file) })));
 });
 
 authRouter.post('/login', (req, res) => {

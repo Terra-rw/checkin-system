@@ -18,12 +18,34 @@ if (!transporter) {
   console.warn('[email] SMTP_HOST not set: emails will be printed to the console instead of sent.');
 }
 
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/** HTML version of a plain-text email, with the institution's logo and name on top. */
+function brandedHtml(brand, text) {
+  const base = (process.env.APP_URL || '').replace(/\/+$/, '');
+  const logo =
+    brand.logo_file && base
+      ? `<img src="${escapeHtml(`${base}/media/${brand.logo_file}`)}" width="36" height="36" alt="" style="display:block;border:0;width:36px;height:36px;object-fit:contain">`
+      : '';
+  const body = escapeHtml(text.trim()).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color:#0f766e;word-break:break-all">$1</a>');
+  return `<!doctype html><html><body style="margin:0;padding:24px 12px;background:#eef1f4;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#17202a">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #d5dbe1;border-radius:12px">
+<tr><td style="padding:16px 22px;border-bottom:3px solid #0f766e">
+<table role="presentation" cellpadding="0" cellspacing="0"><tr>
+${logo ? `<td style="padding-right:12px">${logo}</td>` : ''}
+<td style="font-size:16px;font-weight:700">${escapeHtml(brand.name)}<div style="font-size:12px;font-weight:400;color:#4b5563">Check-in</div></td>
+</tr></table></td></tr>
+<tr><td style="padding:20px 22px;font-size:15px;line-height:1.55;white-space:pre-wrap">${body}</td></tr>
+</table></body></html>`;
+}
+
 /**
  * Sends an email. Never throws: a mail failure must not block a check-in.
- * `fromName` shows the institution's name as the sender.
+ * `brand` is the institution row: its name becomes the sender name and its logo heads the HTML version.
  * Returns { sent: true } when the SMTP server accepted it, otherwise { sent: false, error }.
  */
-export async function sendMail({ to, subject, text, fromName, attachments }) {
+export async function sendMail({ to, subject, text, brand, fromName = brand?.name, attachments }) {
   const recipients = [...new Set(to.map((e) => e && e.trim()).filter(Boolean))];
   if (recipients.length === 0) {
     console.warn(`[email] Not sent ("${subject}"): no recipients. Add alert emails in Admin > Settings.`);
@@ -43,6 +65,7 @@ export async function sendMail({ to, subject, text, fromName, attachments }) {
       to: recipients.join(', '),
       subject,
       text,
+      html: brand ? brandedHtml(brand, text) : undefined,
       attachments,
     });
     return { sent: true };

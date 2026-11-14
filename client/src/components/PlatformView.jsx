@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, navigate, setSession, initials } from '../api.js';
+import Logo from './Logo.jsx';
 
 const TINTS = ['#0f766e', '#1d4ed8', '#7c3aed', '#b45309', '#be185d', '#0369a1'];
 
@@ -120,9 +121,13 @@ export default function PlatformView() {
                       <tr key={i.id}>
                         <td>
                           <div className="who">
-                            <span className="avatar" style={{ background: TINTS[i.id % TINTS.length] }}>
-                              {initials(i.name)}
-                            </span>
+                            {i.logoUrl ? (
+                              <Logo inst={i} size={34} />
+                            ) : (
+                              <span className="avatar" style={{ background: TINTS[i.id % TINTS.length] }}>
+                                {initials(i.name)}
+                              </span>
+                            )}
                             <div>
                               <div className="strong">{i.name}</div>
                               <div className="muted small">{i.timezone}</div>

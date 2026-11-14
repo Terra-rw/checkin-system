@@ -4,8 +4,9 @@ import { StatusBadges } from './EmployeeView.jsx';
 import Reports from './admin/Reports.jsx';
 import Settings from './admin/Settings.jsx';
 import Security from './admin/Security.jsx';
+import Branding from './admin/Branding.jsx';
 
-export default function AdminView({ me, tab }) {
+export default function AdminView({ me, tab, onBrandingSaved }) {
   const [settingsTab, setSettingsTab] = useState('general');
   if (tab === 'reports') return <Reports me={me} />;
   if (tab === 'employees') return <Employees me={me} />;
@@ -15,6 +16,7 @@ export default function AdminView({ me, tab }) {
         <nav className="subtabs" aria-label="Settings sections">
           {[
             ['general', 'Office, hours & alerts'],
+            ['branding', 'Branding'],
             ['security', 'Security & devices'],
           ].map(([key, label]) => (
             <button key={key} className={settingsTab === key ? 'active' : ''} aria-current={settingsTab === key ? 'page' : undefined} onClick={() => setSettingsTab(key)}>
@@ -22,7 +24,9 @@ export default function AdminView({ me, tab }) {
             </button>
           ))}
         </nav>
-        {settingsTab === 'general' ? <Settings /> : <Security me={me} />}
+        {settingsTab === 'general' && <Settings />}
+        {settingsTab === 'branding' && <Branding me={me} onSaved={onBrandingSaved} />}
+        {settingsTab === 'security' && <Security me={me} />}
       </div>
     );
   }

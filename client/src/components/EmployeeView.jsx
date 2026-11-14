@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, getPosition, formatTime, formatDate, formatDuration } from '../api.js';
+import { photoStyle } from './Logo.jsx';
 
 function useClock(timeZone) {
   const [now, setNow] = useState(new Date());
@@ -30,6 +31,7 @@ export default function EmployeeView({ me, onChange }) {
   const [result, setResult] = useState(null);
 
   const state = !today ? 'in' : !today.check_out_at ? 'out' : 'done';
+  const photo = photoStyle(me.institution);
 
   async function act(kind) {
     setResult(null);
@@ -50,10 +52,23 @@ export default function EmployeeView({ me, onChange }) {
   return (
     <div className="stack">
       <section className="card hero">
-        <div className="muted">{clock.date}</div>
-        <div className="clock">{clock.time}</div>
+        {photo ? (
+          <div className={`hero-photo ${me.institution.photoDim ? 'dim' : ''}`} style={photo}>
+            <div className="hero-photo-text">
+              <div className="small">
+                {clock.date} · {s.officeName}
+              </div>
+              <div className="clock">{clock.time}</div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="muted">{clock.date}</div>
+            <div className="clock">{clock.time}</div>
+          </>
+        )}
         <div className="muted small">
-          {s.officeName} · {s.workStart}–{s.workEnd}
+          {photo ? 'Work hours' : s.officeName} · {s.workStart}–{s.workEnd}
           {!me.isWorkDay && ' · Not a scheduled work day'}
         </div>
 

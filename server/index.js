@@ -8,6 +8,7 @@ import { localParts, toMinutes, formatTime, formatDuration, haversine, isValidTi
 import { sendMail, alertRecipients, smtpConfigured } from './mailer.js';
 import { startScheduler } from './scheduler.js';
 import { buildReport, displayCell, exportReport, reportFileName } from './reports.js';
+import { UPLOAD_DIR, saveImage, removeFile } from './media.js';
 import {
   HttpError,
   authRouter,
@@ -30,6 +31,18 @@ seedOwner();
 const app = express();
 app.set('trust proxy', 1); // Render and most hosts sit behind one proxy
 app.use(express.json());
+
+// Uploaded logos and photos. Names are random and change on every upload, so they can be cached forever.
+app.use(
+  '/media',
+  express.static(UPLOAD_DIR, {
+    immutable: true,
+    maxAge: '365d',
+    index: false,
+    setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  }),
+  (_req, res) => res.status(404).end(),
+);
 
 app.use('/api/auth', authRouter);
 
@@ -134,7 +147,7 @@ app.post('/api/attendance/check-in', requireAuth, requireInstitution, noSupport,
     if (s.emailEmployee) to.push(req.user.email);
     sendMail({
       to,
-      fromName: req.inst.name,
+      brand: req.inst,
       subject: `Late check-in: ${req.user.name} (${formatDuration(lateMinutes)} late)`,
       text:
         `${req.user.name} <${req.user.email}> checked in late.\n\n` +
@@ -182,7 +195,7 @@ app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport
     if (s.emailEmployee) to.push(req.user.email);
     sendMail({
       to,
-      fromName: req.inst.name,
+      brand: req.inst,
       subject: `Early check-out: ${req.user.name} (${formatDuration(earlyMinutes)} early)`,
       text:
         `${req.user.name} <${req.user.email}> checked out before the end of the work day.\n\n` +
@@ -368,7 +381,7 @@ admin.post('/test-email', async (req, res) => {
   if (to.length === 0) throw new HttpError(400, 'Add at least one alert email in Settings first.');
   const result = await sendMail({
     to,
-    fromName: req.inst.name,
+    brand: req.inst,
     subject: 'Check-in system: test email',
     text: `This is a test email from the ${req.inst.name} check-in system, requested by ${req.user.name}.`,
   });
@@ -453,13 +466,58 @@ admin.post('/reports/email', async (req, res) => {
   const file = await exportReport(report, format, req.user.name);
   const result = await sendMail({
     to: [req.user.email],
-    fromName: req.inst.name,
+    brand: req.inst,
     subject: `${report.title}: ${report.period}`,
     text: `Attached is the ${report.title.toLowerCase()} report for ${req.inst.name}, ${report.period}.\n`,
     attachments: [{ filename: reportFileName(report, file.ext), content: file.buffer }],
   });
   if (!result.sent && smtpConfigured) throw new HttpError(502, `Sending failed: ${result.error}`);
   res.json({ message: smtpConfigured ? `Report sent to ${req.user.email}.` : 'SMTP is not configured; the email was printed in the server console.' });
+});
+
+// Branding (logo + login photo)
+const reloadInst = (id) => db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
+const brandingOf = (inst) => {
+  const p = publicInstitution(inst);
+  return { logoUrl: p.logoUrl, photoUrl: p.photoUrl, photoFocus: p.photoFocus, photoDim: p.photoDim };
+};
+const rawImage = express.raw({ type: ['image/png', 'image/jpeg'], limit: '4mb' });
+
+admin.get('/branding', (req, res) => res.json(brandingOf(req.inst)));
+
+for (const kind of ['logo', 'photo']) {
+  const column = `${kind}_file`;
+
+  admin.put(`/branding/${kind}`, rawImage, (req, res) => {
+    const saved = saveImage(req.inst.id, kind, req.body);
+    if (saved.error) throw new HttpError(400, saved.error);
+    const old = req.inst[column];
+    db.prepare(`UPDATE institutions SET ${column} = ? WHERE id = ?`).run(saved.name, req.inst.id);
+    removeFile(old);
+    logEvent(req.inst.id, req.user.id, 'branding', `${req.user.name} uploaded a new ${kind === 'logo' ? 'logo' : 'login photo'}.`);
+    res.json(brandingOf(reloadInst(req.inst.id)));
+  });
+
+  admin.delete(`/branding/${kind}`, (req, res) => {
+    removeFile(req.inst[column]);
+    db.prepare(`UPDATE institutions SET ${column} = NULL WHERE id = ?`).run(req.inst.id);
+    logEvent(req.inst.id, req.user.id, 'branding', `${req.user.name} removed the ${kind === 'logo' ? 'logo' : 'login photo'}.`);
+    res.json(brandingOf(reloadInst(req.inst.id)));
+  });
+}
+
+admin.patch('/branding', (req, res) => {
+  const pct = (v, name) => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw new HttpError(400, `${name} must be between 0 and 100.`);
+    return Math.round(n * 10) / 10;
+  };
+  const inst = req.inst;
+  const x = req.body.focusX === undefined ? inst.photo_focus_x : pct(req.body.focusX, 'focusX');
+  const y = req.body.focusY === undefined ? inst.photo_focus_y : pct(req.body.focusY, 'focusY');
+  const dim = req.body.dim === undefined ? inst.photo_dim : req.body.dim ? 1 : 0;
+  db.prepare('UPDATE institutions SET photo_focus_x = ?, photo_focus_y = ?, photo_dim = ? WHERE id = ?').run(x, y, dim, inst.id);
+  res.json(brandingOf(reloadInst(inst.id)));
 });
 
 app.use('/api/admin', admin);

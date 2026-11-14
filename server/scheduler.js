@@ -34,7 +34,7 @@ async function checkNoShows(inst, s, now) {
   const list = missing.map((m) => `  - ${m.name} <${m.email}>`).join('\n');
   await sendMail({
     to: alertRecipients(s),
-    fromName: inst.name,
+    brand: inst,
     subject: `${missing.length} employee(s) not checked in - ${now.date}`,
     text:
       `The following employees had not checked in at ${s.officeName} by ` +
@@ -45,7 +45,7 @@ async function checkNoShows(inst, s, now) {
     for (const m of missing) {
       await sendMail({
         to: [m.email],
-        fromName: inst.name,
+        brand: inst,
         subject: `You have not checked in today (${now.date})`,
         text:
           `Hi ${m.name},\n\nWork starts at ${s.workStart} and you have not checked in at ` +
@@ -65,7 +65,7 @@ async function weeklyReport(inst, s, now) {
   const file = await exportReport(report, 'xlsx', 'automatic weekly report');
   await sendMail({
     to: alertRecipients(s),
-    fromName: inst.name,
+    brand: inst,
     subject: `Weekly attendance summary: ${report.period}`,
     text: `Attached is last week's attendance summary for ${inst.name}.\n\n${report.stats.map((x) => `${x.label}: ${x.value}`).join('\n')}\n`,
     attachments: [{ filename: reportFileName(report, 'xlsx'), content: file.buffer }],
