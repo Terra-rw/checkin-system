@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, getPosition, formatTime, formatDate } from '../api.js';
+import { api, getPosition, formatTime, formatDate, formatDuration } from '../api.js';
 
 function useClock(timeZone) {
   const [now, setNow] = useState(new Date());
@@ -17,8 +17,8 @@ export function StatusBadges({ r }) {
   if (!r || !r.check_in_at) return <span className="badge red">Absent</span>;
   return (
     <>
-      {r.late ? <span className="badge amber">Late {r.late_minutes}m</span> : <span className="badge green">On time</span>}
-      {r.early ? <span className="badge amber">Left {r.early_minutes}m early</span> : null}
+      {r.late ? <span className="badge amber">Late {formatDuration(r.late_minutes)}</span> : <span className="badge green">On time</span>}
+      {r.early ? <span className="badge amber">Left {formatDuration(r.early_minutes)} early</span> : null}
     </>
   );
 }
