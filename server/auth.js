@@ -310,13 +310,16 @@ authRouter.get('/institutions', (req, res) => {
   res.json(rows.map((r) => ({ name: r.name, code: r.code, logoUrl: mediaUrl(r.logo_file) })));
 });
 
-authRouter.post('/login', (req, res) => {
+authRouter.post('/login', async (req, res) => {
   const { inst, user } = findLoginUser(req.body.institution, req.body.email);
   if (user) {
     const locked = lockedMessage(user);
     if (locked) throw new HttpError(423, locked);
   }
-  if (!user || !user.password_hash || !bcrypt.compareSync(String(req.body.password || ''), user.password_hash)) {
+  // Async compare: the ~100 ms of hashing is split into small slices so other
+  // requests (check-ins, page loads) keep flowing while someone logs in.
+  const passwordOk = Boolean(user?.password_hash) && (await bcrypt.compare(String(req.body.password || ''), user.password_hash));
+  if (!passwordOk) {
     if (user) {
       const fails = user.failed_logins + 1;
       if (fails >= MAX_PASSWORD_ATTEMPTS) lockUser(user, inst, `${fails} wrong passwords in a row`);

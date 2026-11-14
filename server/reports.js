@@ -40,6 +40,11 @@ export function buildReport(inst, s, { type = 'summary', from, to, userId }) {
     )
     .all(inst.id, from, to);
   const byKey = new Map(records.map((r) => [`${r.user_id}|${r.date}`, r]));
+  const datesByUser = new Map();
+  for (const r of records) {
+    if (!datesByUser.has(r.user_id)) datesByUser.set(r.user_id, []);
+    datesByUser.get(r.user_id).push(r.date);
+  }
 
   // Absences only count for scheduled work days that have already started.
   const lastDay = to < today ? to : today;
@@ -52,7 +57,7 @@ export function buildReport(inst, s, { type = 'summary', from, to, userId }) {
   const summary = [];
   for (const u of users) {
     const expected = u.active ? workDays.filter((d) => d >= u.created) : [];
-    const recordDates = records.filter((r) => r.user_id === u.id).map((r) => r.date);
+    const recordDates = datesByUser.get(u.id) || [];
     const dates = [...new Set([...expected, ...recordDates])].sort();
     if (!u.active && recordDates.length === 0) continue;
 

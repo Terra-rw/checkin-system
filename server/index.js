@@ -7,7 +7,7 @@ import { db, tx, getSettings, saveSettings, seedOwner, normalizeCode, logEvent, 
 import { localParts, toMinutes, formatTime, formatDuration, haversine, isValidTimeZone } from './time.js';
 import { sendMail, alertRecipients, smtpConfigured } from './mailer.js';
 import { startScheduler } from './scheduler.js';
-import { buildReport, displayCell, exportReport, reportFileName } from './reports.js';
+import { runReportJob } from './reportJobs.js';
 import { UPLOAD_DIR, saveImage, removeFile } from './media.js';
 import {
   HttpError,
@@ -429,47 +429,41 @@ admin.post('/devices/forget-all', (req, res) => {
   res.json({ message: `Removed ${r.changes} trusted device(s).` });
 });
 
-// Reports
-function reportFromQuery(req, q) {
-  const s = getSettings(req.inst.id);
+// Reports — built in a background worker (reportJobs.js) so they never stall check-ins.
+async function reportJob(req, q, task, format) {
   try {
-    return buildReport(req.inst, s, { type: q.type, from: q.from, to: q.to, userId: q.userId || null });
+    return await runReportJob({
+      task,
+      format,
+      instId: req.inst.id,
+      generatedBy: req.user.name,
+      query: { type: q.type, from: q.from, to: q.to, userId: q.userId || null },
+    });
   } catch (err) {
-    throw new HttpError(err.status || 500, err.message);
+    throw new HttpError(err.status || 500, err.status ? err.message : 'The report could not be built.');
   }
 }
 
 admin.get('/reports', async (req, res) => {
-  const report = reportFromQuery(req, req.query);
   const format = req.query.format;
   if (['csv', 'xlsx', 'pdf'].includes(format)) {
-    const file = await exportReport(report, format, req.user.name);
+    const file = await reportJob(req, req.query, 'export', format);
     res.setHeader('Content-Type', file.type);
-    res.setHeader('Content-Disposition', `attachment; filename="${reportFileName(report, file.ext)}"`);
-    return res.send(file.buffer);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.fileName}"`);
+    return res.send(Buffer.from(file.buffer));
   }
-  const limit = 50;
-  res.json({
-    title: report.title,
-    period: report.period,
-    workDayCount: report.workDayCount,
-    stats: report.stats,
-    columns: report.columns.map(({ key, label, type }) => ({ key, label, type })),
-    total: report.rows.length,
-    rows: report.rows.slice(0, limit).map((r) => Object.fromEntries(report.columns.map((c) => [c.key, displayCell(c, r[c.key])]))),
-  });
+  res.json(await reportJob(req, req.query, 'preview'));
 });
 
 admin.post('/reports/email', async (req, res) => {
-  const report = reportFromQuery(req, req.body);
   const format = ['csv', 'xlsx', 'pdf'].includes(req.body.format) ? req.body.format : 'xlsx';
-  const file = await exportReport(report, format, req.user.name);
+  const file = await reportJob(req, req.body, 'export', format);
   const result = await sendMail({
     to: [req.user.email],
     brand: req.inst,
-    subject: `${report.title}: ${report.period}`,
-    text: `Attached is the ${report.title.toLowerCase()} report for ${req.inst.name}, ${report.period}.\n`,
-    attachments: [{ filename: reportFileName(report, file.ext), content: file.buffer }],
+    subject: `${file.title}: ${file.period}`,
+    text: `Attached is the ${file.title.toLowerCase()} report for ${req.inst.name}, ${file.period}.\n`,
+    attachments: [{ filename: file.fileName, content: Buffer.from(file.buffer) }],
   });
   if (!result.sent && smtpConfigured) throw new HttpError(502, `Sending failed: ${result.error}`);
   res.json({ message: smtpConfigured ? `Report sent to ${req.user.email}.` : 'SMTP is not configured; the email was printed in the server console.' });

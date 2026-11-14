@@ -1,7 +1,7 @@
 import { db, getSettings } from './db.js';
 import { localParts, toMinutes, addDays } from './time.js';
 import { sendMail, alertRecipients } from './mailer.js';
-import { buildReport, exportReport, reportFileName } from './reports.js';
+import { runReportJob } from './reportJobs.js';
 
 /** Returns true the first time it is called for (institution, date, kind). */
 function claimOnce(instId, date, kind) {
@@ -61,14 +61,19 @@ async function weeklyReport(inst, s, now) {
   if (!claimOnce(inst.id, now.date, 'weekly_report')) return;
   const from = addDays(now.date, -7);
   const to = addDays(now.date, -1);
-  const report = buildReport(inst, s, { type: 'summary', from, to });
-  const file = await exportReport(report, 'xlsx', 'automatic weekly report');
+  const file = await runReportJob({
+    task: 'export',
+    format: 'xlsx',
+    instId: inst.id,
+    generatedBy: 'automatic weekly report',
+    query: { type: 'summary', from, to },
+  });
   await sendMail({
     to: alertRecipients(s),
     brand: inst,
-    subject: `Weekly attendance summary: ${report.period}`,
-    text: `Attached is last week's attendance summary for ${inst.name}.\n\n${report.stats.map((x) => `${x.label}: ${x.value}`).join('\n')}\n`,
-    attachments: [{ filename: reportFileName(report, 'xlsx'), content: file.buffer }],
+    subject: `Weekly attendance summary: ${file.period}`,
+    text: `Attached is last week's attendance summary for ${inst.name}.\n\n${file.stats.map((x) => `${x.label}: ${x.value}`).join('\n')}\n`,
+    attachments: [{ filename: file.fileName, content: Buffer.from(file.buffer) }],
   });
 }
 
