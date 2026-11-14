@@ -28,6 +28,19 @@ if (!readOnly && isProduction && (!process.env.DB_PATH || insideApp)) {
   );
   process.exit(1);
 }
+// The folder must already exist: on a hosted server it is the persistent disk's mount point.
+// Creating it ourselves would put the database on throwaway storage, so explain instead.
+const dbDir = path.dirname(dbPath);
+if (!readOnly && !fs.existsSync(dbDir)) {
+  console.error(
+    `\n[db] CANNOT START: the folder ${dbDir} (from DB_PATH=${process.env.DB_PATH || dbPath}) does not exist.\n` +
+      '     On a hosted server this means the persistent disk is not mounted there.\n' +
+      `     Render: Settings > Disks must show a disk with Mount Path ${dbDir} (paid instance types only).\n` +
+      `     AWS: mount the data volume at ${dbDir} (see deploy/aws/README.md).\n` +
+      '     Or change DB_PATH to a file inside the folder where your disk is mounted.\n',
+  );
+  process.exit(1);
+}
 const dbExisted = fs.existsSync(dbPath);
 
 export const db = new DatabaseSync(dbPath, { readOnly });
@@ -220,6 +233,107 @@ function migrate() {
     `);
   }
 
+  if (db.prepare('PRAGMA user_version').get().user_version < 4) {
+    // Contracts, time off, holidays, check-out corrections and the manager role.
+    // users is rebuilt (SQLite can't change a CHECK constraint) to allow role 'manager'
+    // and to add manager_id ("reports to"). Existing rows are copied unchanged.
+    tx(() => {
+      db.exec(`
+        CREATE TABLE users_new (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          institution_id INTEGER REFERENCES institutions(id) ON DELETE CASCADE,
+          name           TEXT NOT NULL,
+          email          TEXT NOT NULL,
+          password_hash  TEXT,
+          role           TEXT NOT NULL DEFAULT 'employee' CHECK (role IN ('employee', 'manager', 'admin', 'owner')),
+          manager_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          active         INTEGER NOT NULL DEFAULT 1,
+          token_version  INTEGER NOT NULL DEFAULT 0,
+          failed_logins  INTEGER NOT NULL DEFAULT 0,
+          locked_until   TEXT,
+          created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE (institution_id, email)
+        );
+        INSERT INTO users_new (id, institution_id, name, email, password_hash, role, active, token_version, failed_logins, locked_until, created_at)
+          SELECT id, institution_id, name, email, password_hash, role, active, token_version, failed_logins, locked_until, created_at FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE INDEX users_institution ON users (institution_id);
+        CREATE INDEX users_manager ON users (manager_id);
+
+        -- Per-person working terms, kept as history so past reports don't change.
+        -- No row = full-time on the institution's schedule (everyone today).
+        -- schedule JSON: {"1":null,"2":["09:00","13:00"],...} keyed by weekday (0 = Sunday);
+        --   null = institution times that day. schedule NULL = institution days (full-time)
+        --   or flexible hours (part-time).
+        CREATE TABLE work_terms (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          institution_id   INTEGER NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
+          user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          effective_from   TEXT NOT NULL,
+          employment_type  TEXT NOT NULL CHECK (employment_type IN ('full_time', 'part_time')),
+          contract_minutes INTEGER,
+          contract_period  TEXT CHECK (contract_period IN ('week', 'month')),
+          schedule         TEXT,
+          created_by       INTEGER,
+          created_at       TEXT NOT NULL,
+          UNIQUE (user_id, effective_from)
+        );
+
+        -- Time off and agreed adjustments. Pending requests already stop absence alerts.
+        CREATE TABLE time_off (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          institution_id INTEGER NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
+          user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          type           TEXT NOT NULL CHECK (type IN ('sick', 'personal', 'maternity', 'paternity', 'mission', 'adjusted')),
+          start_date     TEXT NOT NULL,
+          end_date       TEXT NOT NULL,
+          part           TEXT NOT NULL DEFAULT 'full' CHECK (part IN ('full', 'am', 'pm')),
+          arrive_by      TEXT,
+          leave_from     TEXT,
+          weekdays       TEXT,
+          reason         TEXT NOT NULL DEFAULT '',
+          status         TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'declined', 'cancelled')),
+          requested_by   INTEGER,
+          decided_by     INTEGER,
+          decided_at     TEXT,
+          decision_note  TEXT,
+          created_at     TEXT NOT NULL
+        );
+        CREATE INDEX time_off_user ON time_off (user_id, start_date, end_date);
+        CREATE INDEX time_off_inst ON time_off (institution_id, status, start_date);
+
+        -- Days the institution doesn't operate. yearly = repeats on the same month/day.
+        CREATE TABLE holidays (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          institution_id INTEGER NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
+          start_date     TEXT NOT NULL,
+          end_date       TEXT NOT NULL,
+          name           TEXT NOT NULL,
+          kind           TEXT NOT NULL DEFAULT 'public' CHECK (kind IN ('public', 'closure')),
+          yearly         INTEGER NOT NULL DEFAULT 0,
+          created_at     TEXT NOT NULL
+        );
+        CREATE INDEX holidays_inst ON holidays (institution_id, start_date);
+
+        ALTER TABLE attendance ADD COLUMN source TEXT NOT NULL DEFAULT 'gps';
+        CREATE TABLE attendance_corrections (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          institution_id INTEGER NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
+          attendance_id  INTEGER NOT NULL REFERENCES attendance(id) ON DELETE CASCADE,
+          changed_by     INTEGER,
+          field          TEXT NOT NULL,
+          old_value      TEXT,
+          new_value      TEXT,
+          reason         TEXT NOT NULL,
+          created_at     TEXT NOT NULL
+        );
+        CREATE INDEX corrections_att ON attendance_corrections (attendance_id);
+        PRAGMA user_version = 4;
+      `);
+    });
+  }
+
   db.exec('PRAGMA foreign_keys = ON;');
 }
 
@@ -266,6 +380,7 @@ export const DEFAULT_SETTINGS = {
   notifyEarlyCheckout: true,
   notifyNoShow: true,
   weeklyReport: false, // email last week's summary to alert emails every Monday
+  halfDaySplit: '13:00', // a morning/afternoon half day ends/starts here (or mid-shift if outside it)
   // Security
   require2fa: true, // email a code when someone logs in on a new device
   trustDays: 90,

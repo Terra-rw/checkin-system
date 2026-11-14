@@ -72,7 +72,26 @@ tx(() => {
     }
   }
 });
-console.log(`  ${db.prepare('SELECT COUNT(*) c FROM attendance').get().c} attendance rows`);
+// Contracts and time off, so the "who is expected" rules do real work:
+// 10% part-time (half flexible, half fixed Mon/Wed/Fri), 5% with a day off, 3% on leave this month, a public holiday.
+tx(() => {
+  const terms = db.prepare(
+    "INSERT INTO work_terms (institution_id, user_id, effective_from, employment_type, contract_minutes, contract_period, schedule, created_at) VALUES (?, ?, '2026-01-01', ?, ?, ?, ?, '2026-01-01')",
+  );
+  const off = db.prepare(
+    "INSERT INTO time_off (institution_id, user_id, type, start_date, end_date, part, status, requested_by, created_at) VALUES (?, ?, ?, ?, ?, 'full', 'approved', ?, '2026-01-01')",
+  );
+  ids.forEach((id, i) => {
+    if (i % 20 === 0) terms.run(inst, id, 'part_time', 1200, 'week', null);
+    else if (i % 20 === 1) terms.run(inst, id, 'part_time', 900, 'week', JSON.stringify({ 1: ['08:00', '13:00'], 3: ['08:00', '13:00'], 5: ['08:00', '13:00'] }));
+    else if (i % 20 === 2) terms.run(inst, id, 'full_time', null, null, JSON.stringify({ 0: null, 1: null, 2: null, 3: null, 4: null, 6: null }));
+    if (i % 33 === 5) off.run(inst, id, i % 2 ? 'sick' : 'personal', addDays(today, -10), addDays(today, -6), id);
+  });
+  db.prepare("INSERT INTO holidays (institution_id, start_date, end_date, name, kind, yearly, created_at) VALUES (?, ?, ?, 'Bench holiday', 'public', 0, '2026-01-01')").run(
+    inst, addDays(today, -15), addDays(today, -15),
+  );
+});
+console.log(`  ${db.prepare('SELECT COUNT(*) c FROM attendance').get().c} attendance rows, ${db.prepare('SELECT COUNT(*) c FROM work_terms').get().c} contracts, ${db.prepare('SELECT COUNT(*) c FROM time_off').get().c} time-off entries`);
 db.close();
 
 // ---------------------------------------------------------------- server + process stats
@@ -157,13 +176,14 @@ await scenario('login (password check)', 50, 4, () => req('POST', '/api/auth/log
 await scenario('page load (/api/me)', 2000, 20, (i) => req('GET', '/api/me', { tok: token(ids[i % ids.length]) }));
 await scenario('check-in', n - 1, 20, () => req('POST', '/api/attendance/check-in', { tok: token(ids[ci++]), body: { lat: -1.9442, lng: 30.062, accuracy: 10 } }));
 await scenario('check-out', n - 1, 20, () => req('POST', '/api/attendance/check-out', { tok: token(ids[co++]), body: { lat: -1.9442, lng: 30.062, accuracy: 10 } }));
-await scenario(`admin today list (${EMPLOYEES} people)`, 50, 4, () => req('GET', `/api/admin/attendance?from=${today}&to=${today}`, { tok: adminTok }));
-await scenario('report preview: month summary', 10, 1, () => req('GET', `/api/admin/reports?type=summary&from=${monthAgo}&to=${today}`, { tok: adminTok }));
-await scenario('report PDF: month summary', 5, 1, () => req('GET', `/api/admin/reports?type=summary&from=${monthAgo}&to=${today}&format=pdf`, { tok: adminTok }));
-await scenario('report Excel: month daily log', 3, 1, () => req('GET', `/api/admin/reports?type=daily&from=${monthAgo}&to=${today}&format=xlsx`, { tok: adminTok }));
+await scenario(`admin today list (${EMPLOYEES} people)`, 50, 4, () => req('GET', `/api/team/attendance?from=${today}&to=${today}`, { tok: adminTok }));
+await scenario('report preview: month summary', 10, 1, () => req('GET', `/api/team/reports?type=summary&from=${monthAgo}&to=${today}`, { tok: adminTok }));
+await scenario('report PDF: month summary', 5, 1, () => req('GET', `/api/team/reports?type=summary&from=${monthAgo}&to=${today}&format=pdf`, { tok: adminTok }));
+await scenario('report preview: month hours vs contract', 10, 1, () => req('GET', `/api/team/reports?type=hours&from=${monthAgo}&to=${today}`, { tok: adminTok }));
+await scenario('report Excel: month daily log', 3, 1, () => req('GET', `/api/team/reports?type=daily&from=${monthAgo}&to=${today}&format=xlsx`, { tok: adminTok }));
 
 // Page loads while a big export runs (reports run in a background worker).
-const heavy = req('GET', `/api/admin/reports?type=daily&from=${monthAgo}&to=${today}&format=xlsx`, { tok: adminTok });
+const heavy = req('GET', `/api/team/reports?type=daily&from=${monthAgo}&to=${today}&format=xlsx`, { tok: adminTok });
 const during = [];
 const stopAt = Date.now() + 2500;
 while (Date.now() < stopAt) during.push(await req('GET', '/api/me', { tok: token(ids[during.length % ids.length]) }));

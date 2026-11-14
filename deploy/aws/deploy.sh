@@ -52,7 +52,8 @@ echo "$PREV -> $NEW"
 
 build() {
   npm ci --prefix server --omit=dev --no-audit --no-fund
-  npm ci --prefix client --no-audit --no-fund
+  # NODE_ENV=production (from the env file) would skip devDependencies, but Vite is one: include them.
+  npm ci --prefix client --include=dev --no-audit --no-fund
   npm run build --prefix client
 }
 

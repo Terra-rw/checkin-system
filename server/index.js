@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, tx, getSettings, saveSettings, seedOwner, normalizeCode, logEvent, DEFAULT_SETTINGS } from './db.js';
-import { localParts, toMinutes, formatTime, formatDuration, haversine, isValidTimeZone } from './time.js';
+import { localParts, toMinutes, formatTime, formatDuration, haversine, isValidTimeZone, addDays } from './time.js';
+import { loadPlanContext } from './schedule.js';
+import { managerOf, alertTargets, scopeSql, latestTermsMap, contractSummary } from './people.js';
 import { sendMail, alertRecipients, smtpConfigured } from './mailer.js';
 import { startScheduler } from './scheduler.js';
-import { runReportJob } from './reportJobs.js';
+import { team, mine } from './team.js';
 import { UPLOAD_DIR, saveImage, removeFile } from './media.js';
 import {
   HttpError,
@@ -25,6 +27,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
+const MAX_SHIFT_MS = 16 * 60 * 60 * 1000;
 
 seedOwner();
 
@@ -107,6 +110,20 @@ function noSupport(req, _res, next) {
 
 // ---------------------------------------------------------------- me / employee
 
+/** Today's plan for one person (see schedule.js). */
+function planFor(inst, s, userId, date) {
+  return loadPlanContext(inst.id, s, date, date, [userId]).dayPlan(userId, date);
+}
+const publicPlan = (p) => ({
+  expected: p.expected,
+  reason: p.reason,
+  label: p.label,
+  start: p.start || null,
+  end: p.end || null,
+  flexible: p.flexible,
+  partTime: p.partTime,
+});
+
 app.get('/api/me', requireAuth, (req, res) => {
   if (!req.inst) return res.json({ user: publicUser(req.user), institution: null });
   const s = getSettings(req.inst.id);
@@ -114,6 +131,16 @@ app.get('/api/me', requireAuth, (req, res) => {
   const recent = req.user.support
     ? []
     : db.prepare('SELECT * FROM attendance WHERE user_id = ? ORDER BY date DESC LIMIT 14').all(req.user.id);
+  const manager = managerOf(req.user);
+  const pendingApprovals =
+    req.user.role === 'admin' || req.user.role === 'manager'
+      ? db
+          .prepare(
+            `SELECT COUNT(*) c FROM time_off t JOIN users u ON u.id = t.user_id
+             WHERE t.status = 'pending' AND ${scopeSql(req).sql} AND t.user_id != ?`,
+          )
+          .get(...scopeSql(req).params, req.user.id).c
+      : 0;
   res.json({
     user: publicUser(req.user),
     support: Boolean(req.user.support),
@@ -121,6 +148,9 @@ app.get('/api/me', requireAuth, (req, res) => {
     today: req.user.support ? null : todayRecord(req.user.id, now.date) || null,
     todayDate: now.date,
     isWorkDay: s.workDays.includes(now.weekday),
+    plan: req.user.support ? null : publicPlan(planFor(req.inst, s, req.user.id, now.date)),
+    manager: manager ? { id: manager.id, name: manager.name } : null,
+    pendingApprovals,
     settings: publicSettings(s),
     recent,
   });
@@ -137,8 +167,10 @@ app.post('/api/attendance/check-in', requireAuth, requireInstitution, noSupport,
     throw new HttpError(409, `You already checked in today at ${formatTime(existing.check_in_at, s.timezone)}.`);
   }
 
-  const start = toMinutes(s.workStart);
-  const late = s.workDays.includes(now.weekday) && now.minutes > start + s.graceMinutes;
+  // Late only when the person is expected today, against their own (possibly adjusted) start.
+  const plan = planFor(req.inst, s, req.user.id, now.date);
+  const start = plan.expected ? toMinutes(plan.start) : null;
+  const late = plan.expected && now.minutes > start + s.graceMinutes;
   const lateMinutes = late ? now.minutes - start : 0;
 
   db.prepare(
@@ -149,17 +181,15 @@ app.post('/api/attendance/check-in', requireAuth, requireInstitution, noSupport,
 
   const time = formatTime(nowDate, s.timezone);
   if (late) {
-    const to = alertRecipients(s);
-    if (s.emailEmployee) to.push(req.user.email);
     sendMail({
-      to,
+      to: alertTargets(s, req.user),
       brand: req.inst,
       subject: `Late check-in: ${req.user.name} (${formatDuration(lateMinutes)} late)`,
       text:
         `${req.user.name} <${req.user.email}> checked in late.\n\n` +
         `Date:        ${now.date}\n` +
         `Checked in:  ${time}\n` +
-        `Start time:  ${s.workStart} (grace period ${s.graceMinutes} min)\n` +
+        `Start time:  ${plan.start} (grace period ${s.graceMinutes} min)\n` +
         `Late by:     ${formatDuration(lateMinutes)}\n` +
         `Location:    ${loc.distance} m from ${s.officeName}\n`,
     });
@@ -179,14 +209,25 @@ app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport
   const nowDate = new Date();
   const now = localParts(nowDate, s.timezone);
 
-  const record = todayRecord(req.user.id, now.date);
+  // Today's record, or yesterday's still-open one after midnight (only if the shift stays
+  // under 16 h, so a forgotten check-out isn't closed the next morning with a bogus duration).
+  let record = todayRecord(req.user.id, now.date);
+  if (!record) {
+    const prev = todayRecord(req.user.id, addDays(now.date, -1));
+    if (prev && !prev.check_out_at && nowDate - new Date(prev.check_in_at) < MAX_SHIFT_MS) record = prev;
+    else if (prev && !prev.check_out_at) {
+      throw new HttpError(409, "You didn't check out yesterday. Ask your manager to fix it; then check in for today.");
+    }
+  }
   if (!record) throw new HttpError(409, 'You have not checked in today.');
   if (record.check_out_at) {
     throw new HttpError(409, `You already checked out at ${formatTime(record.check_out_at, s.timezone)}.`);
   }
 
-  const end = toMinutes(s.workEnd);
-  const early = s.workDays.includes(now.weekday) && now.minutes < end;
+  // Early is judged against the record's own day; a check-out after midnight is never early.
+  const plan = planFor(req.inst, s, req.user.id, record.date);
+  const end = plan.expected ? toMinutes(plan.end) : null;
+  const early = plan.expected && record.date === now.date && now.minutes < end;
   const earlyMinutes = early ? end - now.minutes : 0;
 
   db.prepare(
@@ -197,10 +238,8 @@ app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport
 
   const time = formatTime(nowDate, s.timezone);
   if (early && s.notifyEarlyCheckout) {
-    const to = alertRecipients(s);
-    if (s.emailEmployee) to.push(req.user.email);
     sendMail({
-      to,
+      to: alertTargets(s, req.user),
       brand: req.inst,
       subject: `Early check-out: ${req.user.name} (${formatDuration(earlyMinutes)} early)`,
       text:
@@ -208,15 +247,15 @@ app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport
         `Date:         ${now.date}\n` +
         `Checked in:   ${formatTime(record.check_in_at, s.timezone)}\n` +
         `Checked out:  ${time}\n` +
-        `End time:     ${s.workEnd}\n` +
+        `End time:     ${plan.end}\n` +
         `Early by:     ${formatDuration(earlyMinutes)}\n`,
     });
   }
 
   res.json({
-    record: todayRecord(req.user.id, now.date),
+    record: db.prepare('SELECT * FROM attendance WHERE id = ?').get(record.id),
     message: early
-      ? `Checked out at ${time}, ${formatDuration(earlyMinutes)} before ${s.workEnd}.`
+      ? `Checked out at ${time}, ${formatDuration(earlyMinutes)} before ${plan.end}.`
       : `Checked out at ${time}. See you tomorrow!`,
   });
 });
@@ -226,53 +265,39 @@ app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport
 const admin = express.Router();
 admin.use(requireAuth, requireAdmin);
 
-admin.get('/attendance', (req, res) => {
-  const s = getSettings(req.inst.id);
-  const today = localParts(new Date(), s.timezone).date;
-  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-  const from = dateRe.test(req.query.from) ? req.query.from : today;
-  const to = dateRe.test(req.query.to) ? req.query.to : from;
-
-  let rows;
-  if (from === to) {
-    rows = db
-      .prepare(
-        `SELECT u.id AS user_id, u.name, u.email, u.role, ? AS date,
-                a.id, a.check_in_at, a.check_in_distance, a.late, a.late_minutes,
-                a.check_out_at, a.check_out_distance, a.early, a.early_minutes
-         FROM users u
-         LEFT JOIN attendance a ON a.user_id = u.id AND a.date = ?
-         WHERE u.institution_id = ? AND (u.active = 1 OR a.id IS NOT NULL)
-         ORDER BY u.name COLLATE NOCASE`,
-      )
-      .all(from, from, req.inst.id);
-  } else {
-    rows = db
-      .prepare(
-        `SELECT a.*, u.name, u.email, u.role FROM attendance a
-         JOIN users u ON u.id = a.user_id
-         WHERE u.institution_id = ? AND a.date BETWEEN ? AND ?
-         ORDER BY a.date DESC, u.name COLLATE NOCASE`,
-      )
-      .all(req.inst.id, from, to);
-  }
-  res.json({ from, to, rows });
-});
-
 const userInInstitution = (req) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ? AND institution_id = ?').get(Number(req.params.id), req.inst.id);
   if (!user) throw new HttpError(404, 'User not found.');
   return user;
 };
 
+const ROLES = ['employee', 'manager', 'admin'];
+
+/** Validates a "reports to" choice: a manager or admin in the same institution, not themselves. */
+function parseManagerId(req, value, selfId) {
+  if (value === null || value === '' || value === undefined) return null;
+  const m = db.prepare("SELECT id FROM users WHERE id = ? AND institution_id = ? AND role IN ('manager', 'admin') AND active = 1").get(Number(value), req.inst.id);
+  if (!m) throw new HttpError(400, 'Choose an active manager or admin from this institution.');
+  if (m.id === selfId) throw new HttpError(400, "Someone can't report to themselves.");
+  return m.id;
+}
+
 admin.get('/users', (req, res) => {
-  res.json(db.prepare('SELECT * FROM users WHERE institution_id = ? ORDER BY name COLLATE NOCASE').all(req.inst.id).map(publicUser));
+  const s = getSettings(req.inst.id);
+  const terms = latestTermsMap(req.inst.id, localParts(new Date(), s.timezone).date);
+  res.json(
+    db
+      .prepare('SELECT * FROM users WHERE institution_id = ? ORDER BY name COLLATE NOCASE')
+      .all(req.inst.id)
+      .map((u) => ({ ...publicUser(u), contract: contractSummary(terms.get(u.id), s), partTime: terms.get(u.id)?.employment_type === 'part_time' })),
+  );
 });
 
 admin.post('/users', async (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
-  const role = req.body.role === 'admin' ? 'admin' : 'employee';
+  const role = ROLES.includes(req.body.role) ? req.body.role : 'employee';
+  const managerId = parseManagerId(req, req.body.managerId, null);
   const password = req.body.password ? String(req.body.password) : '';
   if (!name) throw new HttpError(400, 'Name is required.');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, 'A valid email is required.');
@@ -281,8 +306,8 @@ admin.post('/users', async (req, res) => {
     throw new HttpError(409, 'Someone with that email already exists.');
   }
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO users (institution_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)')
-    .run(req.inst.id, name, email, password ? bcrypt.hashSync(password, 10) : null, role);
+    .prepare('INSERT INTO users (institution_id, name, email, password_hash, role, manager_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(req.inst.id, name, email, password ? bcrypt.hashSync(password, 10) : null, role, managerId);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid);
   let message = `${name} was added.`;
   if (!password) {
@@ -308,9 +333,18 @@ admin.patch('/users/:id', (req, res) => {
     if (!name) throw new HttpError(400, 'Name is required.');
     db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
   }
-  if (req.body.role !== undefined) {
+  if (req.body.role !== undefined && req.body.role !== user.role) {
+    if (!ROLES.includes(req.body.role)) throw new HttpError(400, 'Role must be employee, manager or admin.');
     if (isSelf && req.body.role !== 'admin') throw new HttpError(400, "You can't remove your own admin role.");
-    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(req.body.role === 'admin' ? 'admin' : 'employee', user.id);
+    db.prepare('UPDATE users SET role = ?, token_version = token_version + 1 WHERE id = ?').run(req.body.role, user.id);
+    if (req.body.role === 'employee') {
+      // Their former team now reports to nobody until HR reassigns it.
+      db.prepare('UPDATE users SET manager_id = NULL WHERE manager_id = ? AND institution_id = ?').run(user.id, req.inst.id);
+    }
+    logEvent(req.inst.id, req.user.id, 'role', `${req.user.name} set ${user.name}'s role to ${req.body.role}.`);
+  }
+  if (req.body.managerId !== undefined) {
+    db.prepare('UPDATE users SET manager_id = ? WHERE id = ?').run(parseManagerId(req, req.body.managerId, user.id), user.id);
   }
   if (req.body.active !== undefined) {
     if (isSelf && !req.body.active) throw new HttpError(400, "You can't deactivate yourself.");
@@ -324,6 +358,109 @@ admin.patch('/users/:id', (req, res) => {
     );
   }
   res.json(publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)));
+});
+
+// Contracts (work terms). History is kept: each row applies from effective_from onwards.
+admin.get('/users/:id/terms', (req, res) => {
+  const user = userInInstitution(req);
+  const rows = db.prepare('SELECT * FROM work_terms WHERE user_id = ? AND institution_id = ? ORDER BY effective_from DESC').all(user.id, req.inst.id);
+  res.json(
+    rows.map((t) => ({
+      id: t.id,
+      effectiveFrom: t.effective_from,
+      employmentType: t.employment_type,
+      contractMinutes: t.contract_minutes,
+      contractPeriod: t.contract_period,
+      schedule: t.schedule ? JSON.parse(t.schedule) : null,
+      createdAt: t.created_at,
+    })),
+  );
+});
+
+/**
+ * Body: { effectiveFrom, employmentType: 'full_time'|'part_time',
+ *         mode: 'institution'|'custom'|'flexible'|'fixed', days: [1,2,...],
+ *         times: { "2": ["09:00","13:00"], ... }, contractHours, contractPeriod: 'week'|'month' }
+ */
+admin.put('/users/:id/terms', (req, res) => {
+  const user = userInInstitution(req);
+  const b = req.body;
+  const effectiveFrom = String(b.effectiveFrom || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) throw new HttpError(400, 'Choose the date the contract starts.');
+  const type = b.employmentType === 'part_time' ? 'part_time' : 'full_time';
+  const days = Array.isArray(b.days) ? [...new Set(b.days.map(Number).filter((d) => d >= 0 && d <= 6))].sort() : [];
+  const timeOk = (t) => typeof t === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(t);
+  let schedule = null;
+  let contractMinutes = null;
+  let contractPeriod = null;
+
+  if (type === 'full_time') {
+    if (b.mode === 'custom') {
+      if (days.length === 0) throw new HttpError(400, 'Choose at least one working day.');
+      schedule = Object.fromEntries(days.map((d) => [d, null]));
+    }
+  } else {
+    contractPeriod = b.contractPeriod === 'month' ? 'month' : 'week';
+    const hours = Number(b.contractHours);
+    const max = contractPeriod === 'week' ? 60 : 260;
+    if (!Number.isFinite(hours) || hours < 1 || hours > max) throw new HttpError(400, `Enter contracted hours between 1 and ${max}.`);
+    contractMinutes = Math.round(hours * 60);
+    if (b.mode === 'fixed') {
+      if (days.length === 0) throw new HttpError(400, 'Choose at least one working day.');
+      schedule = {};
+      for (const d of days) {
+        const [start, end] = (b.times && b.times[d]) || [];
+        if (!timeOk(start) || !timeOk(end)) throw new HttpError(400, 'Set a start and end time for each working day.');
+        if (toMinutes(end) <= toMinutes(start)) throw new HttpError(400, 'End time must be after start.');
+        schedule[d] = [start, end];
+      }
+    }
+  }
+
+  db.prepare(
+    `INSERT INTO work_terms (institution_id, user_id, effective_from, employment_type, contract_minutes, contract_period, schedule, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, effective_from) DO UPDATE SET employment_type = excluded.employment_type,
+       contract_minutes = excluded.contract_minutes, contract_period = excluded.contract_period,
+       schedule = excluded.schedule, created_by = excluded.created_by, created_at = excluded.created_at`,
+  ).run(req.inst.id, user.id, effectiveFrom, type, contractMinutes, contractPeriod, schedule ? JSON.stringify(schedule) : null, req.user.id, new Date().toISOString());
+  const s = getSettings(req.inst.id);
+  const summary = contractSummary({ employment_type: type, schedule: schedule ? JSON.stringify(schedule) : null, contract_minutes: contractMinutes, contract_period: contractPeriod }, s);
+  logEvent(req.inst.id, req.user.id, 'contract', `${req.user.name} set ${user.name}'s contract to ${summary} from ${effectiveFrom}.`);
+  res.json({ message: `${user.name}: ${summary} from ${effectiveFrom}.`, contract: summary });
+});
+
+// Holidays & closures
+admin.get('/holidays', (req, res) => {
+  const s = getSettings(req.inst.id);
+  const today = localParts(new Date(), s.timezone).date;
+  const rows = db.prepare('SELECT * FROM holidays WHERE institution_id = ? ORDER BY start_date').all(req.inst.id);
+  res.json(
+    rows.map((h) => ({ id: h.id, name: h.name, startDate: h.start_date, endDate: h.end_date, kind: h.kind, yearly: !!h.yearly, past: !h.yearly && h.end_date < today })),
+  );
+});
+
+admin.post('/holidays', (req, res) => {
+  const name = String(req.body.name || '').trim().slice(0, 100);
+  const start = String(req.body.startDate || '');
+  const end = String(req.body.endDate || start);
+  if (!name) throw new HttpError(400, 'Give the holiday a name.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || end < start) throw new HttpError(400, 'Choose valid dates.');
+  if (req.body.yearly && start.slice(0, 4) !== end.slice(0, 4)) throw new HttpError(400, 'A yearly holiday must start and end in the same year.');
+  const kind = req.body.kind === 'closure' ? 'closure' : 'public';
+  const id = db
+    .prepare('INSERT INTO holidays (institution_id, start_date, end_date, name, kind, yearly, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(req.inst.id, start, end, name, kind, req.body.yearly ? 1 : 0, new Date().toISOString()).lastInsertRowid;
+  logEvent(req.inst.id, req.user.id, 'holiday', `${req.user.name} added ${name} (${start}${end !== start ? ` – ${end}` : ''}).`);
+  res.status(201).json({ id: Number(id), message: `${name} added. Nobody is expected on ${start === end ? 'that day' : 'those days'}.` });
+});
+
+admin.delete('/holidays/:id', (req, res) => {
+  const h = db.prepare('SELECT * FROM holidays WHERE id = ? AND institution_id = ?').get(Number(req.params.id), req.inst.id);
+  if (!h) throw new HttpError(404, 'Holiday not found.');
+  db.prepare('DELETE FROM holidays WHERE id = ?').run(h.id);
+  logEvent(req.inst.id, req.user.id, 'holiday', `${req.user.name} removed ${h.name}.`);
+  res.json({ message: `${h.name} removed.` });
 });
 
 admin.get('/settings', (req, res) => {
@@ -435,46 +572,6 @@ admin.post('/devices/forget-all', (req, res) => {
   res.json({ message: `Removed ${r.changes} trusted device(s).` });
 });
 
-// Reports — built in a background worker (reportJobs.js) so they never stall check-ins.
-async function reportJob(req, q, task, format) {
-  try {
-    return await runReportJob({
-      task,
-      format,
-      instId: req.inst.id,
-      generatedBy: req.user.name,
-      query: { type: q.type, from: q.from, to: q.to, userId: q.userId || null },
-    });
-  } catch (err) {
-    throw new HttpError(err.status || 500, err.status ? err.message : 'The report could not be built.');
-  }
-}
-
-admin.get('/reports', async (req, res) => {
-  const format = req.query.format;
-  if (['csv', 'xlsx', 'pdf'].includes(format)) {
-    const file = await reportJob(req, req.query, 'export', format);
-    res.setHeader('Content-Type', file.type);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.fileName}"`);
-    return res.send(Buffer.from(file.buffer));
-  }
-  res.json(await reportJob(req, req.query, 'preview'));
-});
-
-admin.post('/reports/email', async (req, res) => {
-  const format = ['csv', 'xlsx', 'pdf'].includes(req.body.format) ? req.body.format : 'xlsx';
-  const file = await reportJob(req, req.body, 'export', format);
-  const result = await sendMail({
-    to: [req.user.email],
-    brand: req.inst,
-    subject: `${file.title}: ${file.period}`,
-    text: `Attached is the ${file.title.toLowerCase()} report for ${req.inst.name}, ${file.period}.\n`,
-    attachments: [{ filename: file.fileName, content: Buffer.from(file.buffer) }],
-  });
-  if (!result.sent && smtpConfigured) throw new HttpError(502, `Sending failed: ${result.error}`);
-  res.json({ message: smtpConfigured ? `Report sent to ${req.user.email}.` : 'SMTP is not configured; the email was printed in the server console.' });
-});
-
 // Branding (logo + login photo)
 const reloadInst = (id) => db.prepare('SELECT * FROM institutions WHERE id = ?').get(id);
 const brandingOf = (inst) => {
@@ -521,6 +618,8 @@ admin.patch('/branding', (req, res) => {
 });
 
 app.use('/api/admin', admin);
+app.use('/api/team', team);
+app.use('/api/time-off', mine);
 
 // ---------------------------------------------------------------- platform owner
 

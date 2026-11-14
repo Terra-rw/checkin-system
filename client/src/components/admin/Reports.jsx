@@ -5,6 +5,7 @@ const TYPES = [
   ['daily', 'Daily log', 'Every check-in and check-out, one row per person per day'],
   ['summary', 'Summary per person', 'Days present, lateness and hours worked, totalled'],
   ['issues', 'Late, early & absent only', 'Just the exceptions, for follow-up'],
+  ['hours', 'Hours vs contract', 'Part-timers: hours worked against contracted hours, for payroll'],
 ];
 const FORMATS = [
   ['xlsx', 'XLSX', 'Excel', 'Formatted sheet', 'xl'],
@@ -55,7 +56,7 @@ export default function Reports({ me }) {
   const [busy, setBusy] = useState('');
 
   useEffect(() => {
-    api('/admin/users').then(setPeople);
+    api('/team/people').then(setPeople);
   }, []);
 
   const query = `type=${type}&from=${from}&to=${to}${userId ? `&userId=${userId}` : ''}`;
@@ -67,7 +68,7 @@ export default function Reports({ me }) {
       setError('Choose a valid date range.');
       return;
     }
-    api(`/admin/reports?${query}`).then(setPreview).catch((e) => setError(e.message));
+    api(`/team/reports?${query}`).then(setPreview).catch((e) => setError(e.message));
   }, [query, from, to]);
 
   function choosePreset(p) {
@@ -80,7 +81,7 @@ export default function Reports({ me }) {
     setBusy('download');
     setMsg(null);
     try {
-      const name = await download(`/admin/reports?${query}&format=${format}`);
+      const name = await download(`/team/reports?${query}&format=${format}`);
       setMsg({ type: 'success', text: `Downloaded ${name}.` });
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
@@ -93,7 +94,7 @@ export default function Reports({ me }) {
     setBusy('email');
     setMsg(null);
     try {
-      const d = await api('/admin/reports/email', { method: 'POST', body: { type, from, to, userId: userId || null, format } });
+      const d = await api('/team/reports/email', { method: 'POST', body: { type, from, to, userId: userId || null, format } });
       setMsg({ type: 'success', text: d.message });
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
@@ -103,13 +104,16 @@ export default function Reports({ me }) {
   }
 
   const ext = FORMATS.find((f) => f[0] === format)[1];
-  const activePeople = people.filter((p) => p.active);
+  const visible = type === 'hours' ? people.filter((p) => p.partTime) : people;
+  const activePeople = visible.filter((p) => p.active);
 
   return (
     <div className="stack">
       <div>
         <h1 className="h1">Reports</h1>
-        <p className="muted">Pick what to include, preview it, then download as Excel, CSV or PDF.</p>
+        <p className="muted">
+          Pick what to include, preview it, then download as Excel, CSV or PDF.{me.user.role === 'manager' ? ' Reports cover the people who report to you.' : ''}
+        </p>
       </div>
 
       <section className="card stack-sm" aria-labelledby="rep-build">
@@ -166,7 +170,7 @@ export default function Reports({ me }) {
             People
             <select value={userId} onChange={(e) => setUserId(e.target.value)}>
               <option value="">Everyone ({activePeople.length})</option>
-              {people.map((p) => (
+              {visible.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
                   {p.active ? '' : ' (disabled)'}
@@ -193,6 +197,11 @@ export default function Reports({ me }) {
         {!preview && !error && <p className="muted">Loading…</p>}
         {preview && (
           <>
+            {preview.warnings?.map((w) => (
+              <div key={w} className="alert warn">
+                {w} Fix them in {me.user.role === 'admin' ? 'Attendance' : 'My team'}.
+              </div>
+            ))}
             <div className="stats">
               {preview.stats.map((s) => (
                 <div className="stat" key={s.label}>
@@ -274,5 +283,6 @@ export default function Reports({ me }) {
 function StatusText({ text }) {
   if (text === 'On time') return <span className="badge green">On time</span>;
   if (text === 'Absent') return <span className="badge red">Absent</span>;
-  return <span className="badge amber">{text}</span>;
+  if (/Late|Left early|No check-out/.test(text)) return <span className="badge amber">{text}</span>;
+  return <span className="badge blue">{text}</span>;
 }

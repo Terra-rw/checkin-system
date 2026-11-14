@@ -54,7 +54,7 @@ export async function run() {
     const s = (await call('GET', '/admin/settings', null, admin.token)).data.settings;
     t.check('old settings kept', s.officeName === 'Old HQ' && s.radiusMeters === 120 && s.alertEmails === 'boss@old.test', JSON.stringify(s));
     t.check('timezone recorded explicitly', typeof s.timezone === 'string' && s.timezone.length > 0, s.timezone);
-    const rep = await call('GET', `/admin/reports?type=daily&from=${day}&to=${day}`, null, admin.token);
+    const rep = await call('GET', `/team/reports?type=daily&from=${day}&to=${day}`, null, admin.token);
     const row = rep.data.rows?.find((x) => x.name === 'Old Worker');
     t.check('old attendance row survives with lateness in hr/min', row && row.lateMin === '1 hr 25 min', JSON.stringify(rep.data.rows));
     const branding = await call('GET', '/admin/branding', null, admin.token);

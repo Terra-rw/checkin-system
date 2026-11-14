@@ -2,6 +2,8 @@ import { db, getSettings } from './db.js';
 import { localParts, toMinutes, addDays } from './time.js';
 import { sendMail, alertRecipients } from './mailer.js';
 import { runReportJob } from './reportJobs.js';
+import { loadPlanContext } from './schedule.js';
+import { managerOf } from './people.js';
 
 /** Returns true the first time it is called for (institution, date, kind). */
 function claimOnce(instId, date, kind) {
@@ -12,45 +14,75 @@ function claimOnce(instId, date, kind) {
 }
 
 /**
- * Once per work day, as soon as the late deadline (workStart + grace) passes,
- * email a summary of employees who still haven't checked in.
+ * No-show alerts, per person: once someone's own expected start + grace has passed and they
+ * haven't checked in, they're included in one email for that start time. People who aren't
+ * expected today (day off, holiday, time off, pending request, flexible hours) are never included.
+ * HR gets everyone; each manager gets only their team; the employee optionally gets a reminder.
  */
 async function checkNoShows(inst, s, now) {
-  if (!s.notifyNoShow || !s.workDays.includes(now.weekday)) return;
-  const deadline = toMinutes(s.workStart) + s.graceMinutes;
-  if (now.minutes < deadline || now.minutes >= toMinutes(s.workEnd)) return;
-  if (!claimOnce(inst.id, now.date, 'no_show')) return;
+  if (!s.notifyNoShow) return;
+  const people = db
+    .prepare("SELECT * FROM users WHERE institution_id = ? AND active = 1 AND role IN ('employee', 'manager')")
+    .all(inst.id);
+  if (people.length === 0) return;
+  const ctx = loadPlanContext(inst.id, s, now.date, now.date);
+  const checkedIn = new Set(
+    db
+      .prepare('SELECT a.user_id FROM attendance a JOIN users u ON u.id = a.user_id WHERE u.institution_id = ? AND a.date = ?')
+      .all(inst.id, now.date)
+      .map((r) => r.user_id),
+  );
 
-  const missing = db
-    .prepare(
-      `SELECT u.name, u.email FROM users u
-       WHERE u.institution_id = ? AND u.active = 1 AND u.role = 'employee'
-         AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.user_id = u.id AND a.date = ?)
-       ORDER BY u.name`,
-    )
-    .all(inst.id, now.date);
-  if (missing.length === 0) return;
+  const byStart = new Map();
+  for (const u of people) {
+    if (checkedIn.has(u.id)) continue;
+    const p = ctx.dayPlan(u.id, now.date);
+    if (!p.expected) continue;
+    const deadline = toMinutes(p.start) + s.graceMinutes;
+    if (now.minutes < deadline || now.minutes >= toMinutes(p.end)) continue;
+    if (!byStart.has(p.start)) byStart.set(p.start, []);
+    byStart.get(p.start).push(u);
+  }
 
-  const list = missing.map((m) => `  - ${m.name} <${m.email}>`).join('\n');
-  await sendMail({
-    to: alertRecipients(s),
-    brand: inst,
-    subject: `${missing.length} employee(s) not checked in - ${now.date}`,
-    text:
-      `The following employees had not checked in at ${s.officeName} by ` +
-      `${s.workStart} (+${s.graceMinutes} min grace) on ${now.date}:\n\n${list}\n`,
-  });
+  for (const [start, missing] of byStart) {
+    if (!claimOnce(inst.id, now.date, `no_show:${start}`)) continue;
+    const line = (m) => `  - ${m.name} <${m.email}>`;
+    const intro = `had not checked in at ${s.officeName} by ${start} (+${s.graceMinutes} min grace) on ${now.date}:`;
 
-  if (s.emailEmployee) {
+    await sendMail({
+      to: alertRecipients(s),
+      brand: inst,
+      subject: `${missing.length} employee(s) not checked in (${start} start) - ${now.date}`,
+      text: `The following employees ${intro}\n\n${missing.map(line).join('\n')}\n`,
+    });
+
+    const byManager = new Map();
     for (const m of missing) {
+      const mgr = managerOf(m);
+      if (!mgr) continue;
+      if (!byManager.has(mgr.id)) byManager.set(mgr.id, { mgr, team: [] });
+      byManager.get(mgr.id).team.push(m);
+    }
+    for (const { mgr, team } of byManager.values()) {
       await sendMail({
-        to: [m.email],
+        to: [mgr.email],
         brand: inst,
-        subject: `You have not checked in today (${now.date})`,
-        text:
-          `Hi ${m.name},\n\nWork starts at ${s.workStart} and you have not checked in at ` +
-          `${s.officeName} yet. Please check in as soon as you arrive.\n`,
+        subject: `${team.length} of your team not checked in - ${now.date}`,
+        text: `Hi ${mgr.name},\n\nThese people on your team ${intro}\n\n${team.map(line).join('\n')}\n`,
       });
+    }
+
+    if (s.emailEmployee) {
+      for (const m of missing) {
+        await sendMail({
+          to: [m.email],
+          brand: inst,
+          subject: `You have not checked in today (${now.date})`,
+          text:
+            `Hi ${m.name},\n\nYou were expected at ${start} and have not checked in at ` +
+            `${s.officeName} yet. Please check in as soon as you arrive, or request time off if you're away.\n`,
+        });
+      }
     }
   }
 }
@@ -77,12 +109,13 @@ async function weeklyReport(inst, s, now) {
   });
 }
 
-async function tick() {
+/** One pass over every active institution. Exported so tests can run it on demand. */
+export async function tick(at = new Date()) {
   const institutions = db.prepare("SELECT * FROM institutions WHERE status = 'active'").all();
   for (const inst of institutions) {
     try {
       const s = getSettings(inst.id);
-      const now = localParts(new Date(), s.timezone);
+      const now = localParts(at, s.timezone);
       await checkNoShows(inst, s, now);
       await weeklyReport(inst, s, now);
     } catch (err) {
@@ -90,9 +123,9 @@ async function tick() {
     }
   }
   // Housekeeping: expired codes and links.
-  const now = new Date().toISOString();
-  db.prepare('DELETE FROM login_challenges WHERE expires_at < ?').run(now);
-  db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(now);
+  const nowIso = new Date().toISOString();
+  db.prepare('DELETE FROM login_challenges WHERE expires_at < ?').run(nowIso);
+  db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(nowIso);
 }
 
 export function startScheduler() {
