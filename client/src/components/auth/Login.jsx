@@ -77,7 +77,7 @@ export default function Login({ scope, institution, onLoggedIn }) {
         {!isPlatform && (
           <p className="muted small center-text">
             Not with {institution?.name}?{' '}
-            <a href="/" onClick={(e) => { e.preventDefault(); try { localStorage.removeItem('checkin_last_institution'); } catch { /* ignore */ } navigate('/'); }}>
+            <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }}>
               Choose your institution
             </a>
           </p>

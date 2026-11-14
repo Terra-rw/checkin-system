@@ -89,7 +89,8 @@ The first time v2 starts on an existing database, it moves all people, attendanc
 named by `DEFAULT_INSTITUTION_CODE` / `DEFAULT_INSTITUTION_NAME`. Set those (and the `PLATFORM_OWNER_*` values)
 **before** deploying. After the upgrade:
 
-- The old root address redirects to that institution while it's the only one. Employees should bookmark `/<code>`.
+- The root address now shows a search box where people find their institution by name or code. The device remembers
+  the last one used and offers it first. Employees can also bookmark `/<code>` directly.
 - Everyone has to log in again and confirm their device with an email code once, so make sure SMTP works first.
 
 ## Limitations
