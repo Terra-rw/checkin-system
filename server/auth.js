@@ -279,10 +279,24 @@ authRouter.get('/institution/:code', (req, res) => {
   res.json(publicInstitution(inst));
 });
 
-/** If only one institution is active, the home page can jump straight to it. */
-authRouter.get('/home', (_req, res) => {
-  const rows = db.prepare("SELECT code FROM institutions WHERE status = 'active' LIMIT 2").all();
-  res.json({ single: rows.length === 1 ? rows[0].code : null });
+/**
+ * Lets people find their institution by name or code on the home page.
+ * Needs at least 2 characters and returns a handful of active institutions,
+ * so the full list can't be pulled in one request.
+ */
+authRouter.get('/institutions', (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase().slice(0, 60);
+  if (q.length < 2) return res.json([]);
+  const like = `%${q.replace(/[\\%_]/g, (c) => '\\' + c)}%`;
+  const rows = db
+    .prepare(
+      `SELECT name, code FROM institutions
+       WHERE status = 'active' AND (lower(name) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\')
+       ORDER BY CASE WHEN lower(name) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, name COLLATE NOCASE
+       LIMIT 8`,
+    )
+    .all(like, like, `${like.slice(1)}`, `${like.slice(1)}`);
+  res.json(rows.map((r) => ({ name: r.name, code: r.code })));
 });
 
 authRouter.post('/login', (req, res) => {

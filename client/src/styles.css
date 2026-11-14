@@ -866,3 +866,44 @@ td.actions {
     width: 100%;
   }
 }
+
+/* ------------------------------------------------ institution search */
+
+.inst-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.inst-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 10px 12px;
+  min-height: 56px;
+  border-radius: 12px;
+}
+.inst-option:hover,
+.inst-option:focus-visible {
+  border-color: var(--brand);
+}
+.inst-option.recent {
+  background: var(--card);
+}
+.inst-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.inst-text > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.inst-option .chev {
+  color: var(--muted);
+  flex: none;
+}
