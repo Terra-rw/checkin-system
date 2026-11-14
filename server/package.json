@@ -8,12 +8,18 @@
   },
   "scripts": {
     "dev": "node --watch --env-file-if-exists=.env index.js",
-    "start": "node --env-file-if-exists=.env index.js"
+    "start": "node --env-file-if-exists=.env index.js",
+    "demo": "node scripts/demo.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
-    "nodemailer": "^10.5.0"
+    "nodemailer": "^10.5.0",
+    "pdfkit": "^0.20.2"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

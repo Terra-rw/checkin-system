@@ -1,69 +1,37 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, getSettings, saveSettings, seedAdmin, DEFAULT_SETTINGS } from './db.js';
-import { localParts, toMinutes, formatTime, haversine, isValidTimeZone } from './time.js';
+import { db, tx, getSettings, saveSettings, seedOwner, normalizeCode, logEvent, DEFAULT_SETTINGS } from './db.js';
+import { localParts, toMinutes, formatTime, formatDuration, haversine, isValidTimeZone } from './time.js';
 import { sendMail, alertRecipients, smtpConfigured } from './mailer.js';
 import { startScheduler } from './scheduler.js';
+import { buildReport, displayCell, exportReport, reportFileName } from './reports.js';
+import {
+  HttpError,
+  authRouter,
+  requireAuth,
+  requireAdmin,
+  requireOwner,
+  requireInstitution,
+  publicUser,
+  publicInstitution,
+  validatePassword,
+  sendPasswordLink,
+  issueSupportSession,
+} from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
 
-let JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.warn('[auth] JWT_SECRET not set: using a random one (everyone is logged out on restart).');
-  JWT_SECRET = crypto.randomBytes(32).toString('hex');
-}
-
-seedAdmin();
+seedOwner();
 
 const app = express();
+app.set('trust proxy', 1); // Render and most hosts sit behind one proxy
 app.use(express.json());
 
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-// ---------------------------------------------------------------- auth
-
-const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, active: !!u.active });
-
-function requireAuth(req, _res, next) {
-  const token = (req.headers.authorization || '').replace(/^Bearer /, '');
-  let payload;
-  try {
-    payload = jwt.verify(token, JWT_SECRET);
-  } catch {
-    throw new HttpError(401, 'Please log in.');
-  }
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(payload.sub);
-  if (!user || !user.active) throw new HttpError(401, 'Your account is disabled.');
-  req.user = user;
-  next();
-}
-
-function requireAdmin(req, _res, next) {
-  if (req.user.role !== 'admin') throw new HttpError(403, 'Admins only.');
-  next();
-}
-
-app.post('/api/auth/login', (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (!user || !bcrypt.compareSync(String(req.body.password || ''), user.password_hash)) {
-    throw new HttpError(401, 'Wrong email or password.');
-  }
-  if (!user.active) throw new HttpError(403, 'Your account is disabled.');
-  const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '30d' });
-  res.json({ token, user: publicUser(user) });
-});
+app.use('/api/auth', authRouter);
 
 // ---------------------------------------------------------------- helpers
 
@@ -100,13 +68,11 @@ function verifyLocation(body, s) {
         'Turn on precise location, step outside or near a window, and try again.',
     );
   }
-
   const distance = haversine(lat, lng, s.officeLat, s.officeLng);
   if (distance > s.radiusMeters) {
     throw new HttpError(
       403,
-      `You are about ${Math.round(distance)} m away from ${s.officeName}. ` +
-        `You must be within ${s.radiusMeters} m to do this.`,
+      `You are about ${Math.round(distance)} m away from ${s.officeName}. You must be within ${s.radiusMeters} m to do this.`,
     );
   }
   return { lat, lng, accuracy, distance: Math.round(distance) };
@@ -115,17 +81,25 @@ function verifyLocation(body, s) {
 const todayRecord = (userId, date) =>
   db.prepare('SELECT * FROM attendance WHERE user_id = ? AND date = ?').get(userId, date);
 
-// ---------------------------------------------------------------- employee
+function noSupport(req, _res, next) {
+  if (req.user.support) throw new HttpError(403, "Support sessions can't check in or out.");
+  next();
+}
+
+// ---------------------------------------------------------------- me / employee
 
 app.get('/api/me', requireAuth, (req, res) => {
-  const s = getSettings();
+  if (!req.inst) return res.json({ user: publicUser(req.user), institution: null });
+  const s = getSettings(req.inst.id);
   const now = localParts(new Date(), s.timezone);
-  const recent = db
-    .prepare('SELECT * FROM attendance WHERE user_id = ? ORDER BY date DESC LIMIT 14')
-    .all(req.user.id);
+  const recent = req.user.support
+    ? []
+    : db.prepare('SELECT * FROM attendance WHERE user_id = ? ORDER BY date DESC LIMIT 14').all(req.user.id);
   res.json({
     user: publicUser(req.user),
-    today: todayRecord(req.user.id, now.date) || null,
+    support: Boolean(req.user.support),
+    institution: publicInstitution(req.inst),
+    today: req.user.support ? null : todayRecord(req.user.id, now.date) || null,
     todayDate: now.date,
     isWorkDay: s.workDays.includes(now.weekday),
     settings: publicSettings(s),
@@ -133,8 +107,8 @@ app.get('/api/me', requireAuth, (req, res) => {
   });
 });
 
-app.post('/api/attendance/check-in', requireAuth, (req, res) => {
-  const s = getSettings();
+app.post('/api/attendance/check-in', requireAuth, requireInstitution, noSupport, (req, res) => {
+  const s = getSettings(req.inst.id);
   const loc = verifyLocation(req.body, s);
   const nowDate = new Date();
   const now = localParts(nowDate, s.timezone);
@@ -145,8 +119,7 @@ app.post('/api/attendance/check-in', requireAuth, (req, res) => {
   }
 
   const start = toMinutes(s.workStart);
-  const isWorkDay = s.workDays.includes(now.weekday);
-  const late = isWorkDay && now.minutes > start + s.graceMinutes;
+  const late = s.workDays.includes(now.weekday) && now.minutes > start + s.graceMinutes;
   const lateMinutes = late ? now.minutes - start : 0;
 
   db.prepare(
@@ -159,16 +132,16 @@ app.post('/api/attendance/check-in', requireAuth, (req, res) => {
   if (late) {
     const to = alertRecipients(s);
     if (s.emailEmployee) to.push(req.user.email);
-    // Fire-and-forget so a slow mail server doesn't delay the check-in.
     sendMail({
       to,
-      subject: `Late check-in: ${req.user.name} (${lateMinutes} min late)`,
+      fromName: req.inst.name,
+      subject: `Late check-in: ${req.user.name} (${formatDuration(lateMinutes)} late)`,
       text:
         `${req.user.name} <${req.user.email}> checked in late.\n\n` +
         `Date:        ${now.date}\n` +
         `Checked in:  ${time}\n` +
         `Start time:  ${s.workStart} (grace period ${s.graceMinutes} min)\n` +
-        `Late by:     ${lateMinutes} minutes\n` +
+        `Late by:     ${formatDuration(lateMinutes)}\n` +
         `Location:    ${loc.distance} m from ${s.officeName}\n`,
     });
   }
@@ -176,13 +149,13 @@ app.post('/api/attendance/check-in', requireAuth, (req, res) => {
   res.json({
     record: todayRecord(req.user.id, now.date),
     message: late
-      ? `Checked in at ${time}. You are ${lateMinutes} minutes late; your manager has been notified.`
+      ? `Checked in at ${time}. You are ${formatDuration(lateMinutes)} late; your manager has been notified.`
       : `Checked in at ${time}. Have a good day!`,
   });
 });
 
-app.post('/api/attendance/check-out', requireAuth, (req, res) => {
-  const s = getSettings();
+app.post('/api/attendance/check-out', requireAuth, requireInstitution, noSupport, (req, res) => {
+  const s = getSettings(req.inst.id);
   const loc = verifyLocation(req.body, s);
   const nowDate = new Date();
   const now = localParts(nowDate, s.timezone);
@@ -194,8 +167,7 @@ app.post('/api/attendance/check-out', requireAuth, (req, res) => {
   }
 
   const end = toMinutes(s.workEnd);
-  const isWorkDay = s.workDays.includes(now.weekday);
-  const early = isWorkDay && now.minutes < end;
+  const early = s.workDays.includes(now.weekday) && now.minutes < end;
   const earlyMinutes = early ? end - now.minutes : 0;
 
   db.prepare(
@@ -210,32 +182,33 @@ app.post('/api/attendance/check-out', requireAuth, (req, res) => {
     if (s.emailEmployee) to.push(req.user.email);
     sendMail({
       to,
-      subject: `Early check-out: ${req.user.name} (${earlyMinutes} min early)`,
+      fromName: req.inst.name,
+      subject: `Early check-out: ${req.user.name} (${formatDuration(earlyMinutes)} early)`,
       text:
         `${req.user.name} <${req.user.email}> checked out before the end of the work day.\n\n` +
         `Date:         ${now.date}\n` +
         `Checked in:   ${formatTime(record.check_in_at, s.timezone)}\n` +
         `Checked out:  ${time}\n` +
         `End time:     ${s.workEnd}\n` +
-        `Early by:     ${earlyMinutes} minutes\n`,
+        `Early by:     ${formatDuration(earlyMinutes)}\n`,
     });
   }
 
   res.json({
     record: todayRecord(req.user.id, now.date),
     message: early
-      ? `Checked out at ${time}, ${earlyMinutes} minutes before ${s.workEnd}.`
+      ? `Checked out at ${time}, ${formatDuration(earlyMinutes)} before ${s.workEnd}.`
       : `Checked out at ${time}. See you tomorrow!`,
   });
 });
 
-// ---------------------------------------------------------------- admin
+// ---------------------------------------------------------------- institution admin
 
 const admin = express.Router();
 admin.use(requireAuth, requireAdmin);
 
 admin.get('/attendance', (req, res) => {
-  const s = getSettings();
+  const s = getSettings(req.inst.id);
   const today = localParts(new Date(), s.timezone).date;
   const dateRe = /^\d{4}-\d{2}-\d{2}$/;
   const from = dateRe.test(req.query.from) ? req.query.from : today;
@@ -243,7 +216,6 @@ admin.get('/attendance', (req, res) => {
 
   let rows;
   if (from === to) {
-    // Single day: include active people with no record so absences are visible.
     rows = db
       .prepare(
         `SELECT u.id AS user_id, u.name, u.email, u.role, ? AS date,
@@ -251,50 +223,65 @@ admin.get('/attendance', (req, res) => {
                 a.check_out_at, a.check_out_distance, a.early, a.early_minutes
          FROM users u
          LEFT JOIN attendance a ON a.user_id = u.id AND a.date = ?
-         WHERE u.active = 1 OR a.id IS NOT NULL
-         ORDER BY u.name`,
+         WHERE u.institution_id = ? AND (u.active = 1 OR a.id IS NOT NULL)
+         ORDER BY u.name COLLATE NOCASE`,
       )
-      .all(from, from);
+      .all(from, from, req.inst.id);
   } else {
     rows = db
       .prepare(
         `SELECT a.*, u.name, u.email, u.role FROM attendance a
          JOIN users u ON u.id = a.user_id
-         WHERE a.date BETWEEN ? AND ?
-         ORDER BY a.date DESC, u.name`,
+         WHERE u.institution_id = ? AND a.date BETWEEN ? AND ?
+         ORDER BY a.date DESC, u.name COLLATE NOCASE`,
       )
-      .all(from, to);
+      .all(req.inst.id, from, to);
   }
   res.json({ from, to, rows });
 });
 
-admin.get('/users', (_req, res) => {
-  res.json(db.prepare('SELECT * FROM users ORDER BY name').all().map(publicUser));
+const userInInstitution = (req) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ? AND institution_id = ?').get(Number(req.params.id), req.inst.id);
+  if (!user) throw new HttpError(404, 'User not found.');
+  return user;
+};
+
+admin.get('/users', (req, res) => {
+  res.json(db.prepare('SELECT * FROM users WHERE institution_id = ? ORDER BY name COLLATE NOCASE').all(req.inst.id).map(publicUser));
 });
 
-function validatePassword(p) {
-  if (typeof p !== 'string' || p.length < 6) throw new HttpError(400, 'Password must be at least 6 characters.');
-}
-
-admin.post('/users', (req, res) => {
+admin.post('/users', async (req, res) => {
   const name = String(req.body.name || '').trim();
   const email = String(req.body.email || '').trim().toLowerCase();
   const role = req.body.role === 'admin' ? 'admin' : 'employee';
+  const password = req.body.password ? String(req.body.password) : '';
   if (!name) throw new HttpError(400, 'Name is required.');
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, 'A valid email is required.');
-  validatePassword(req.body.password);
-  if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) {
+  if (password) validatePassword(password);
+  if (db.prepare('SELECT 1 FROM users WHERE institution_id = ? AND email = ?').get(req.inst.id, email)) {
     throw new HttpError(409, 'Someone with that email already exists.');
   }
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)')
-    .run(name, email, bcrypt.hashSync(req.body.password, 10), role);
-  res.status(201).json(publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid)));
+    .prepare('INSERT INTO users (institution_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?)')
+    .run(req.inst.id, name, email, password ? bcrypt.hashSync(password, 10) : null, role);
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid);
+  let message = `${name} was added.`;
+  if (!password) {
+    const r = await sendPasswordLink(req, user, req.inst, 'invite');
+    message = r.sent || !smtpConfigured ? `${name} was added and invited by email.` : `${name} was added, but the invite email failed: ${r.error}`;
+  }
+  res.status(201).json({ user: publicUser(user), message });
+});
+
+admin.post('/users/:id/invite', async (req, res) => {
+  const user = userInInstitution(req);
+  const r = await sendPasswordLink(req, user, req.inst, user.password_hash ? 'reset' : 'invite');
+  if (!r.sent && smtpConfigured) throw new HttpError(502, `Sending failed: ${r.error}`);
+  res.json({ message: user.password_hash ? `Password reset link sent to ${user.email}.` : `Invite sent again to ${user.email}.` });
 });
 
 admin.patch('/users/:id', (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(req.params.id));
-  if (!user) throw new HttpError(404, 'User not found.');
+  const user = userInInstitution(req);
   const isSelf = user.id === req.user.id;
 
   if (req.body.name !== undefined) {
@@ -308,17 +295,20 @@ admin.patch('/users/:id', (req, res) => {
   }
   if (req.body.active !== undefined) {
     if (isSelf && !req.body.active) throw new HttpError(400, "You can't deactivate yourself.");
-    db.prepare('UPDATE users SET active = ? WHERE id = ?').run(req.body.active ? 1 : 0, user.id);
+    db.prepare('UPDATE users SET active = ?, token_version = token_version + 1 WHERE id = ?').run(req.body.active ? 1 : 0, user.id);
   }
   if (req.body.password !== undefined) {
     validatePassword(req.body.password);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(req.body.password, 10), user.id);
+    db.prepare('UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?').run(
+      bcrypt.hashSync(req.body.password, 10),
+      user.id,
+    );
   }
   res.json(publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)));
 });
 
-admin.get('/settings', (_req, res) => {
-  res.json({ settings: getSettings(), smtpConfigured });
+admin.get('/settings', (req, res) => {
+  res.json({ settings: getSettings(req.inst.id), smtpConfigured });
 });
 
 admin.put('/settings', (req, res) => {
@@ -344,6 +334,9 @@ admin.put('/settings', (req, res) => {
   num('radiusMeters', 10, 10000);
   num('maxAccuracyMeters', 5, 5000);
   num('graceMinutes', 0, 240);
+  num('trustDays', 1, 365);
+  num('codeMinutes', 2, 60);
+  num('resetMinutes', 5, 1440);
   time('workStart');
   time('workEnd');
   if (b.timezone !== undefined) {
@@ -355,25 +348,29 @@ admin.put('/settings', (req, res) => {
     out.workDays = [...new Set(b.workDays.map(Number).filter((d) => d >= 0 && d <= 6))].sort();
   }
   if (b.alertEmails !== undefined) out.alertEmails = String(b.alertEmails);
-  for (const k of ['emailEmployee', 'notifyEarlyCheckout', 'notifyNoShow']) {
+  for (const k of ['emailEmployee', 'notifyEarlyCheckout', 'notifyNoShow', 'weeklyReport', 'require2fa']) {
     if (b[k] !== undefined) out[k] = Boolean(b[k]);
   }
 
-  const merged = { ...getSettings(), ...out };
+  const merged = { ...getSettings(req.inst.id), ...out };
   if (toMinutes(merged.workEnd) <= toMinutes(merged.workStart)) {
     throw new HttpError(400, 'End time must be after start time.');
   }
-  res.json({ settings: saveSettings(out), smtpConfigured });
+  if (b.require2fa !== undefined && !out.require2fa) {
+    logEvent(req.inst.id, req.user.id, 'setting', `${req.user.name} turned off email codes for new devices.`);
+  }
+  res.json({ settings: saveSettings(req.inst.id, out), smtpConfigured });
 });
 
 admin.post('/test-email', async (req, res) => {
-  const s = getSettings();
+  const s = getSettings(req.inst.id);
   const to = alertRecipients(s);
   if (to.length === 0) throw new HttpError(400, 'Add at least one alert email in Settings first.');
   const result = await sendMail({
     to,
+    fromName: req.inst.name,
     subject: 'Check-in system: test email',
-    text: `This is a test email from the check-in system, requested by ${req.user.name}.`,
+    text: `This is a test email from the ${req.inst.name} check-in system, requested by ${req.user.name}.`,
   });
   if (result.sent) return res.json({ message: `Test email sent to ${to.join(', ')}.` });
   if (!smtpConfigured) {
@@ -382,7 +379,191 @@ admin.post('/test-email', async (req, res) => {
   throw new HttpError(502, `Sending failed: ${result.error}. Check the SMTP settings and the server logs.`);
 });
 
+// Security & devices
+admin.get('/security', (req, res) => {
+  const devices = db
+    .prepare(
+      `SELECT t.id, t.label, t.created_at, t.last_used_at, u.name, u.email FROM tokens t
+       JOIN users u ON u.id = t.user_id
+       WHERE u.institution_id = ? AND t.kind = 'device' AND t.expires_at > ?
+       ORDER BY t.last_used_at DESC`,
+    )
+    .all(req.inst.id, new Date().toISOString());
+  const events = db
+    .prepare('SELECT kind, detail, created_at FROM security_events WHERE institution_id = ? ORDER BY id DESC LIMIT 30')
+    .all(req.inst.id);
+  res.json({ devices, events });
+});
+
+admin.delete('/devices/:id', (req, res) => {
+  const row = db
+    .prepare(
+      `SELECT t.id, t.label, u.name FROM tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.id = ? AND t.kind = 'device' AND u.institution_id = ?`,
+    )
+    .get(Number(req.params.id), req.inst.id);
+  if (!row) throw new HttpError(404, 'Device not found.');
+  db.prepare('DELETE FROM tokens WHERE id = ?').run(row.id);
+  logEvent(req.inst.id, req.user.id, 'device_removed', `${req.user.name} removed ${row.name}'s ${row.label}.`);
+  res.json({ message: `Removed ${row.name}'s ${row.label}.` });
+});
+
+admin.post('/devices/forget-all', (req, res) => {
+  const r = db
+    .prepare("DELETE FROM tokens WHERE kind = 'device' AND user_id IN (SELECT id FROM users WHERE institution_id = ?)")
+    .run(req.inst.id);
+  logEvent(req.inst.id, req.user.id, 'device_removed', `${req.user.name} removed all trusted devices (${r.changes}).`);
+  res.json({ message: `Removed ${r.changes} trusted device(s).` });
+});
+
+// Reports
+function reportFromQuery(req, q) {
+  const s = getSettings(req.inst.id);
+  try {
+    return buildReport(req.inst, s, { type: q.type, from: q.from, to: q.to, userId: q.userId || null });
+  } catch (err) {
+    throw new HttpError(err.status || 500, err.message);
+  }
+}
+
+admin.get('/reports', async (req, res) => {
+  const report = reportFromQuery(req, req.query);
+  const format = req.query.format;
+  if (['csv', 'xlsx', 'pdf'].includes(format)) {
+    const file = await exportReport(report, format, req.user.name);
+    res.setHeader('Content-Type', file.type);
+    res.setHeader('Content-Disposition', `attachment; filename="${reportFileName(report, file.ext)}"`);
+    return res.send(file.buffer);
+  }
+  const limit = 50;
+  res.json({
+    title: report.title,
+    period: report.period,
+    workDayCount: report.workDayCount,
+    stats: report.stats,
+    columns: report.columns.map(({ key, label, type }) => ({ key, label, type })),
+    total: report.rows.length,
+    rows: report.rows.slice(0, limit).map((r) => Object.fromEntries(report.columns.map((c) => [c.key, displayCell(c, r[c.key])]))),
+  });
+});
+
+admin.post('/reports/email', async (req, res) => {
+  const report = reportFromQuery(req, req.body);
+  const format = ['csv', 'xlsx', 'pdf'].includes(req.body.format) ? req.body.format : 'xlsx';
+  const file = await exportReport(report, format, req.user.name);
+  const result = await sendMail({
+    to: [req.user.email],
+    fromName: req.inst.name,
+    subject: `${report.title}: ${report.period}`,
+    text: `Attached is the ${report.title.toLowerCase()} report for ${req.inst.name}, ${report.period}.\n`,
+    attachments: [{ filename: reportFileName(report, file.ext), content: file.buffer }],
+  });
+  if (!result.sent && smtpConfigured) throw new HttpError(502, `Sending failed: ${result.error}`);
+  res.json({ message: smtpConfigured ? `Report sent to ${req.user.email}.` : 'SMTP is not configured; the email was printed in the server console.' });
+});
+
 app.use('/api/admin', admin);
+
+// ---------------------------------------------------------------- platform owner
+
+const platform = express.Router();
+platform.use(requireAuth, requireOwner);
+const RESERVED_CODES = new Set(['platform', 'api', 'assets', 'admin', 'login', 'reset', 'forgot']);
+
+platform.get('/institutions', (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT i.*,
+              (SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.active = 1) AS people,
+              (SELECT COUNT(*) FROM users u WHERE u.institution_id = i.id AND u.role = 'admin' AND u.password_hash IS NOT NULL) AS ready_admins
+       FROM institutions i ORDER BY i.name COLLATE NOCASE`,
+    )
+    .all();
+  res.json(
+    rows.map((i) => ({
+      ...publicInstitution(i),
+      people: i.people,
+      invitePending: i.ready_admins === 0,
+      timezone: getSettings(i.id).timezone,
+      createdAt: i.created_at,
+    })),
+  );
+});
+
+platform.post('/institutions', async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const code = normalizeCode(req.body.code);
+  const timezone = String(req.body.timezone || 'UTC');
+  const adminName = String(req.body.adminName || '').trim();
+  const adminEmail = String(req.body.adminEmail || '').trim().toLowerCase();
+  if (!name) throw new HttpError(400, 'Institution name is required.');
+  if (code.length < 2 || code.length > 40) throw new HttpError(400, 'Short code must be 2 to 40 letters, numbers or dashes.');
+  if (RESERVED_CODES.has(code)) throw new HttpError(400, `"${code}" is reserved. Choose another short code.`);
+  if (db.prepare('SELECT 1 FROM institutions WHERE code = ?').get(code)) throw new HttpError(409, 'That short code is already taken.');
+  if (!isValidTimeZone(timezone)) throw new HttpError(400, 'Unknown timezone.');
+  if (!adminName) throw new HttpError(400, "First admin's name is required.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adminEmail)) throw new HttpError(400, "A valid email for the first admin is required.");
+
+  const { inst, user } = tx(() => {
+    const id = Number(db.prepare('INSERT INTO institutions (name, code) VALUES (?, ?)').run(name, code).lastInsertRowid);
+    saveSettings(id, { timezone });
+    const uid = db
+      .prepare("INSERT INTO users (institution_id, name, email, password_hash, role) VALUES (?, ?, ?, NULL, 'admin')")
+      .run(id, adminName, adminEmail).lastInsertRowid;
+    return {
+      inst: db.prepare('SELECT * FROM institutions WHERE id = ?').get(id),
+      user: db.prepare('SELECT * FROM users WHERE id = ?').get(uid),
+    };
+  });
+  logEvent(inst.id, req.user.id, 'created', `Institution created by the platform owner. Invite sent to ${adminEmail}.`);
+  const r = await sendPasswordLink(req, user, inst, 'invite');
+  res.status(201).json({
+    institution: publicInstitution(inst),
+    message:
+      r.sent || !smtpConfigured
+        ? `${name} was created and ${adminEmail} was invited.`
+        : `${name} was created, but the invite email failed: ${r.error}`,
+  });
+});
+
+const institutionParam = (req) => {
+  const inst = db.prepare('SELECT * FROM institutions WHERE id = ?').get(Number(req.params.id));
+  if (!inst) throw new HttpError(404, 'Institution not found.');
+  return inst;
+};
+
+platform.patch('/institutions/:id', (req, res) => {
+  const inst = institutionParam(req);
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) throw new HttpError(400, 'Name is required.');
+    db.prepare('UPDATE institutions SET name = ? WHERE id = ?').run(name, inst.id);
+  }
+  if (req.body.status !== undefined) {
+    const status = req.body.status === 'suspended' ? 'suspended' : 'active';
+    db.prepare('UPDATE institutions SET status = ? WHERE id = ?').run(status, inst.id);
+    logEvent(inst.id, req.user.id, status, `Institution ${status === 'suspended' ? 'suspended' : 'reactivated'} by the platform owner.`);
+  }
+  res.json(publicInstitution(db.prepare('SELECT * FROM institutions WHERE id = ?').get(inst.id)));
+});
+
+platform.post('/institutions/:id/invite', async (req, res) => {
+  const inst = institutionParam(req);
+  const pending = db
+    .prepare("SELECT * FROM users WHERE institution_id = ? AND role = 'admin' AND password_hash IS NULL ORDER BY id")
+    .all(inst.id);
+  if (pending.length === 0) throw new HttpError(400, 'Every admin here has already set a password.');
+  for (const u of pending) await sendPasswordLink(req, u, inst, 'invite');
+  res.json({ message: `Invite sent again to ${pending.map((u) => u.email).join(', ')}.` });
+});
+
+platform.post('/institutions/:id/support', (req, res) => {
+  const inst = institutionParam(req);
+  logEvent(inst.id, req.user.id, 'support_access', 'Platform owner opened this institution to help (support access).');
+  res.json(issueSupportSession(req.user, inst));
+});
+
+app.use('/api/platform', platform);
 
 app.use('/api', (_req, _res) => {
   throw new HttpError(404, 'Not found.');

@@ -51,6 +51,41 @@ export function isValidTimeZone(tz) {
   }
 }
 
+/** 45 -> "45 min", 60 -> "1 hr", 85 -> "1 hr 25 min". */
+export function formatDuration(minutes) {
+  const total = Math.max(0, Math.round(Number(minutes) || 0));
+  if (total < 60) return `${total} min`;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return m ? `${h} hr ${m} min` : `${h} hr`;
+}
+
+/** 'YYYY-MM-DD' -> 0-6 (Sunday = 0). */
+export function weekdayOf(ymd) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+/** Inclusive list of 'YYYY-MM-DD' dates. */
+export function dateRange(from, to) {
+  const out = [];
+  const [y, m, d] = from.split('-').map(Number);
+  const cur = new Date(Date.UTC(y, m - 1, d));
+  while (true) {
+    const s = cur.toISOString().slice(0, 10);
+    if (s > to) break;
+    out.push(s);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+
+export function addDays(ymd, n) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + n));
+  return dt.toISOString().slice(0, 10);
+}
+
 /** Great-circle distance in meters between two lat/lng points. */
 export function haversine(lat1, lng1, lat2, lng2) {
   const R = 6371000;
