@@ -1,0 +1,12 @@
+# Litestream continuously copies database changes to S3 (about every second), so you can
+# restore to almost any moment even if the whole server and volume are lost.
+# Install: sudo cp deploy/aws/litestream.yml /etc/litestream.yml && sudo systemctl enable --now litestream
+# The EC2 instance role needs s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket on the bucket.
+dbs:
+  - path: /data/checkin.db
+    replicas:
+      - type: s3
+        bucket: YOUR-BACKUP-BUCKET
+        path: checkin-db
+        region: af-south-1
+        retention: 720h # keep 30 days of history

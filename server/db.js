@@ -1,16 +1,34 @@
 import { DatabaseSync } from 'node:sqlite';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isMainThread } from 'node:worker_threads';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const dbPath = process.env.DB_PATH || path.join(__dirname, 'data.db');
+export const dbPath = path.resolve(process.env.DB_PATH || path.join(__dirname, 'data.db'));
 
 // The main thread owns the database: it runs migrations and does all writes.
 // Worker threads (the report builder) open a read-only connection and never migrate.
 const readOnly = !isMainThread;
+
+// ---------------------------------------------------------------- data-loss guard
+// On a hosted server the app folder is replaced on every deploy, so a database kept inside it
+// is silently wiped. In production we refuse to start unless DB_PATH points outside the app.
+const APP_ROOT = path.resolve(__dirname, '..');
+const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RENDER);
+const insideApp = !path.relative(APP_ROOT, dbPath).startsWith('..') && !path.isAbsolute(path.relative(APP_ROOT, dbPath));
+if (!readOnly && isProduction && (!process.env.DB_PATH || insideApp)) {
+  console.error(
+    '\n[db] REFUSING TO START: the database would be stored inside the app folder\n' +
+      `     (${dbPath}), which is replaced on every deploy, so all data would be lost.\n` +
+      '     Set DB_PATH to a file on a persistent disk, e.g. DB_PATH=/var/data/checkin.db (Render)\n' +
+      '     or DB_PATH=/data/checkin.db (AWS EBS volume).\n',
+  );
+  process.exit(1);
+}
+const dbExisted = fs.existsSync(dbPath);
 
 export const db = new DatabaseSync(dbPath, { readOnly });
 // If the database is briefly locked (e.g. a checkpoint while a report reads), wait up to
@@ -213,7 +231,22 @@ export function normalizeCode(code) {
     .replace(/^-+|-+$/g, '');
 }
 
-if (!readOnly) migrate();
+if (!readOnly) {
+  migrate();
+  // Say where the data lives, so a wrong path is obvious in the logs after every deploy.
+  const n = (sql) => db.prepare(sql).get().c;
+  console.log(
+    `[db] Database: ${dbPath} — ${n('SELECT COUNT(*) c FROM institutions')} institutions, ` +
+      `${n("SELECT COUNT(*) c FROM users WHERE role != 'owner'")} people, ${n('SELECT COUNT(*) c FROM attendance')} attendance records`,
+  );
+  if (!dbExisted) {
+    console.warn(
+      '\n[db] WARNING: no database existed at this path, so a NEW, EMPTY one was created.\n' +
+        '     If this server already had data, the persistent disk is not mounted where DB_PATH points.\n' +
+        '     Stop and fix the disk / DB_PATH before anyone uses the app.\n',
+    );
+  }
+}
 
 // ---------------------------------------------------------------- settings (per institution)
 
