@@ -11,7 +11,8 @@
     "start": "node --env-file-if-exists=.env index.js",
     "demo": "node scripts/demo.js",
     "test": "node test/run.mjs",
-    "bench": "node test/load/bench.mjs"
+    "bench": "node test/load/bench.mjs",
+    "backup": "node --env-file-if-exists=.env scripts/backup.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

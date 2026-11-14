@@ -44,6 +44,12 @@ app.use(
   (_req, res) => res.status(404).end(),
 );
 
+// Health check for load balancers and the deploy script: is the app up and the database readable?
+app.get('/api/health', (_req, res) => {
+  db.prepare('SELECT 1').get();
+  res.json({ ok: true });
+});
+
 app.use('/api/auth', authRouter);
 
 // ---------------------------------------------------------------- helpers

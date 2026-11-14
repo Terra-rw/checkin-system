@@ -1,0 +1,26 @@
+# systemd unit for the check-in app.
+# Install: sudo cp deploy/aws/checkin.service /etc/systemd/system/ && sudo systemctl enable --now checkin
+[Unit]
+Description=Check-in app
+After=network-online.target
+Wants=network-online.target
+# Never start without the data volume: the app must not create an empty database elsewhere.
+RequiresMountsFor=/data
+
+[Service]
+Type=simple
+User=checkin
+Group=checkin
+WorkingDirectory=/opt/checkin/server
+EnvironmentFile=/etc/checkin/checkin.env
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=3
+# Give in-flight requests a moment to finish on restart.
+TimeoutStopSec=10
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/data
+
+[Install]
+WantedBy=multi-user.target

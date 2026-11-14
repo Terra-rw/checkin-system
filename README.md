@@ -103,6 +103,14 @@ npm run build   # builds the React app into client/dist
 npm start       # Express serves the API and the built app on PORT (default 4000)
 ```
 
+**Keep the data outside the code.** Every deploy replaces the code folder, so `DB_PATH` (and the
+uploads, which go next to the database) must point to a persistent disk, e.g. `/var/data/checkin.db`
+on Render or `/data/checkin.db` on an AWS EBS volume. With `NODE_ENV=production` (or on Render) the
+server refuses to start if `DB_PATH` is missing or inside the app folder, and every start logs where
+the database is and how many records it has. **AWS step-by-step guide and safe update script:
+[deploy/aws/README.md](deploy/aws/README.md).** `npm run backup --prefix server` makes a consistent
+copy of the live database at any time.
+
 **HTTPS is required in production**, because browsers only allow location access on `https://` pages (and on `localhost`).
 Set `APP_URL` to the public address so that email links point to the right place, set a long random `JWT_SECRET`,
 and back up the database file.
