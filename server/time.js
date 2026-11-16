@@ -39,9 +39,15 @@ export function localParts(date, timeZone) {
 }
 
 /** '08:30' -> 510 */
+const minutesCache = new Map();
 export function toMinutes(hhmm) {
-  const [h, m] = String(hhmm).split(':').map(Number);
-  return h * 60 + m;
+  let v = minutesCache.get(hhmm);
+  if (v === undefined) {
+    const [h, m] = String(hhmm).split(':').map(Number);
+    v = h * 60 + m;
+    if (minutesCache.size < 5000) minutesCache.set(hhmm, v); // at most 1,440 real values
+  }
+  return v;
 }
 
 /** ISO timestamp -> '08:42' in `timeZone`. */
@@ -58,6 +64,27 @@ export function isValidTimeZone(tz) {
   }
 }
 
+/** Local wall-clock time on a date in `timeZone` -> Date (handles any UTC offset / DST). */
+export function zonedTimeToUtc(ymd, hhmm, timeZone) {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const [hh, mm] = hhmm.split(':').map(Number);
+  const want = Date.UTC(y, m - 1, d, hh, mm);
+  let guess = want;
+  for (let i = 0; i < 2; i++) {
+    const p = localParts(new Date(guess), timeZone);
+    const [py, pm, pd] = p.date.split('-').map(Number);
+    const seen = Date.UTC(py, pm - 1, pd, Math.floor(p.minutes / 60), p.minutes % 60);
+    guess += want - seen;
+  }
+  return new Date(guess);
+}
+
+/** Number of days in the month of 'YYYY-MM-DD'. */
+export function daysInMonth(ymd) {
+  const [y, m] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
 /** 45 -> "45 min", 60 -> "1 hr", 85 -> "1 hr 25 min". */
 export function formatDuration(minutes) {
   const total = Math.max(0, Math.round(Number(minutes) || 0));
@@ -68,9 +95,16 @@ export function formatDuration(minutes) {
 }
 
 /** 'YYYY-MM-DD' -> 0-6 (Sunday = 0). */
+const weekdayCache = new Map();
 export function weekdayOf(ymd) {
-  const [y, m, d] = ymd.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  let v = weekdayCache.get(ymd);
+  if (v === undefined) {
+    const [y, m, d] = ymd.split('-').map(Number);
+    v = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    if (weekdayCache.size > 20000) weekdayCache.clear(); // bounded; reports touch at most a year of dates
+    weekdayCache.set(ymd, v);
+  }
+  return v;
 }
 
 /** Inclusive list of 'YYYY-MM-DD' dates. */

@@ -31,7 +31,9 @@ Object.assign(process.env, {
 const LOGINS = [
   ['Platform owner', `/platform`, 'owner@demo.local', 'demo-owner-1'],
   ['NGA admin', `/nga`, 'hr@nga.demo', 'demo-admin-1'],
+  ['NGA manager', `/nga`, 'grace@nga.demo', 'demo-staff-1'],
   ['NGA employee', `/nga`, 'eric@nga.demo', 'demo-staff-1'],
+  ['NGA part-timer', `/nga`, 'alice@nga.demo', 'demo-staff-1'],
   ['Demo Clinic admin', `/demo-clinic`, 'admin@clinic.demo', 'demo-admin-1'],
 ];
 
@@ -48,11 +50,11 @@ function addInstitution(name, code, settings) {
   saveSettings(id, settings);
   return id;
 }
-function addUser(instId, name, email, role, password) {
+function addUser(instId, name, email, role, password, managerId = null) {
   return Number(
     db
-      .prepare('INSERT INTO users (institution_id, name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(instId, name, email, password ? hash(password) : null, role, createdAt).lastInsertRowid,
+      .prepare('INSERT INTO users (institution_id, name, email, password_hash, role, manager_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(instId, name, email, password ? hash(password) : null, role, managerId, createdAt).lastInsertRowid,
   );
 }
 
@@ -79,15 +81,25 @@ const clinic = addInstitution('Demo Clinic', 'demo-clinic', {
   workEnd: '16:30',
 });
 
-addUser(nga, 'Head of HR', 'hr@nga.demo', 'admin', 'demo-admin-1');
+const hrId = addUser(nga, 'Head of HR', 'hr@nga.demo', 'admin', 'demo-admin-1');
+// Grace manages Eric, Jane and Patrick. Sandrine and Alice report to HR directly.
+const graceId = addUser(nga, 'Grace Iradukunda', 'grace@nga.demo', 'manager', 'demo-staff-1');
+// pattern: which weekdays they come in and their usual hours (minutes from midnight)
+const FULL = { days: [1, 2, 3, 4, 5], start: 480, end: 1020 };
 const staff = [
-  ['Eric Mugisha', 'eric@nga.demo', 3],
-  ['Grace Iradukunda', 'grace@nga.demo', 0],
-  ['Jane Uwase', 'jane@nga.demo', 1],
-  ['Patrick Habimana', 'patrick@nga.demo', 2],
-  ['Sandrine Mukamana', 'sandrine@nga.demo', 0],
-  ['Alice Ingabire', 'alice@nga.demo', 1],
-].map(([name, email, lateness]) => ({ id: addUser(nga, name, email, 'employee', 'demo-staff-1'), lateness }));
+  ['Grace Iradukunda', null, 0, FULL, graceId],
+  ['Eric Mugisha', 'eric@nga.demo', 3, FULL],
+  ['Jane Uwase', 'jane@nga.demo', 1, FULL],
+  ['Patrick Habimana', 'patrick@nga.demo', 2, { days: [1, 3, 5], start: 480, end: 780 }], // part-time, fixed Mon/Wed/Fri 08:00–13:00
+  ['Sandrine Mukamana', 'sandrine@nga.demo', 0, { days: [1, 2, 3, 4], start: 480, end: 1020 }], // Fridays off
+  ['Alice Ingabire', 'alice@nga.demo', 1, { days: [1, 3, 4], start: 540, end: 780, flexible: true }], // part-time, flexible
+].map(([name, email, lateness, pattern, existing]) => ({
+  name,
+  id: existing || addUser(nga, name, email, 'employee', 'demo-staff-1', ['Eric Mugisha', 'Jane Uwase', 'Patrick Habimana'].includes(name) ? graceId : null),
+  lateness,
+  pattern,
+}));
+const byName = Object.fromEntries(staff.map((x) => [x.name.split(' ')[0].toLowerCase(), x.id]));
 addUser(nga, 'Kevin Mutabazi', 'kevin@nga.demo', 'employee', null); // shows "Invite pending"
 
 addUser(clinic, 'Clinic Admin', 'admin@clinic.demo', 'admin', 'demo-admin-1');
@@ -102,6 +114,44 @@ const toIso = (ymd, minutes) => {
   const [y, m, d] = ymd.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d, 0, minutes - OFFSET_HOURS * 60)).toISOString();
 };
+// Contracts, holidays and time off — set before attendance so the sample days line up with them.
+const since = addDays(today, -45);
+const terms = db.prepare(
+  'INSERT INTO work_terms (institution_id, user_id, effective_from, employment_type, contract_minutes, contract_period, schedule, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+);
+const nowIso = new Date().toISOString();
+terms.run(nga, byName.sandrine, since, 'full_time', null, null, JSON.stringify({ 1: null, 2: null, 3: null, 4: null }), hrId, nowIso);
+terms.run(nga, byName.patrick, since, 'part_time', 15 * 60, 'week', JSON.stringify({ 1: ['08:00', '13:00'], 3: ['08:00', '13:00'], 5: ['08:00', '13:00'] }), hrId, nowIso);
+terms.run(nga, byName.alice, since, 'part_time', 12 * 60, 'week', null, hrId, nowIso);
+
+const closureDay = days[Math.floor(days.length / 2)];
+const holiday = db.prepare('INSERT INTO holidays (institution_id, start_date, end_date, name, kind, yearly, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+holiday.run(nga, closureDay, closureDay, 'Staff retreat (office closed)', 'closure', 0, nowIso);
+const year = today.slice(0, 4);
+for (const [md, name] of [['01-01', "New Year's Day"], ['02-01', 'Heroes Day'], ['05-01', 'Labour Day'], ['07-01', 'Independence Day'], ['07-04', 'Liberation Day'], ['12-25', 'Christmas Day'], ['12-26', 'Boxing Day']]) {
+  holiday.run(nga, `${year}-${md}`, `${year}-${md}`, name, 'public', 1, nowIso);
+}
+
+const timeOff = db.prepare(
+  `INSERT INTO time_off (institution_id, user_id, type, start_date, end_date, part, arrive_by, leave_from, weekdays, reason, status, requested_by, decided_by, decided_at, decision_note, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+);
+const weekdayAfter = (from, n) => {
+  let d = from;
+  for (let i = 0; i < n; ) if ([1, 2, 3, 4, 5].includes(weekdayOf((d = addDays(d, 1))))) i++;
+  return d;
+};
+const sickFrom = days[days.length - 4];
+const sickTo = days[days.length - 3];
+const missionDay = days[2];
+timeOff.run(nga, byName.jane, 'sick', sickFrom, sickTo, 'full', null, null, null, 'Flu', 'approved', byName.jane, graceId, nowIso, null, nowIso);
+timeOff.run(nga, byName.eric, 'mission', missionDay, missionDay, 'full', null, null, null, 'Site visit, Huye office', 'approved', graceId, graceId, nowIso, null, nowIso);
+timeOff.run(nga, byName.jane, 'adjusted', since, addDays(today, 60), 'full', '09:30', null, JSON.stringify([1]), 'School run on Mondays', 'approved', graceId, graceId, nowIso, null, nowIso);
+timeOff.run(nga, byName.eric, 'personal', weekdayAfter(today, 3), weekdayAfter(today, 4), 'full', null, null, null, 'Family wedding', 'pending', byName.eric, null, null, null, nowIso);
+timeOff.run(nga, byName.patrick, 'personal', weekdayAfter(today, 1), weekdayAfter(today, 1), 'am', null, null, null, 'Doctor appointment', 'pending', byName.patrick, null, null, null, nowIso);
+timeOff.run(nga, byName.sandrine, 'personal', weekdayAfter(today, 7), weekdayAfter(today, 7), 'full', null, null, null, 'Moving house', 'declined', byName.sandrine, hrId, nowIso, 'Quarter-end closing that day, please pick another', nowIso);
+const skip = new Set([...dateRange(sickFrom, sickTo).map((d) => `${byName.jane}|${d}`), `${byName.eric}|${missionDay}`]);
+
 const insert = db.prepare(
   `INSERT INTO attendance (user_id, date, check_in_at, check_in_lat, check_in_lng, check_in_distance, check_in_accuracy,
                            late, late_minutes, check_out_at, check_out_lat, check_out_lng, check_out_distance, check_out_accuracy,
@@ -109,22 +159,41 @@ const insert = db.prepare(
    VALUES (?, ?, ?, ?, ?, ?, 12, ?, ?, ?, ?, ?, ?, 12, ?, ?)`,
 );
 for (const day of days) {
+  if (day === closureDay) continue;
   for (const s of staff) {
+    const p = s.pattern;
+    if (!p.days.includes(weekdayOf(day)) || skip.has(`${s.id}|${day}`)) continue;
     if (rand() < 0.06) continue; // absent
-    // Most arrive 07:40–08:10; people with higher "lateness" are sometimes very late.
-    let inMin = 460 + Math.floor(rand() * 30);
-    if (rand() < s.lateness * 0.15) inMin = 490 + Math.floor(rand() * (s.lateness * 45));
-    let outMin = 1020 + Math.floor(rand() * 40);
-    if (rand() < 0.1) outMin = 900 + Math.floor(rand() * 100);
-    const late = inMin > 490;
-    const early = outMin < 1020;
+    // Most arrive up to 20 min early or 10 min late; people with higher "lateness" are sometimes very late.
+    const start = s.id === byName.jane && weekdayOf(day) === 1 ? 570 : p.start; // Jane's agreed Monday start
+    let inMin = start - 20 + Math.floor(rand() * 30);
+    if (rand() < s.lateness * 0.15) inMin = start + 10 + Math.floor(rand() * (s.lateness * 45));
+    let outMin = p.end + Math.floor(rand() * 40);
+    if (rand() < 0.1) outMin = p.end - 120 + Math.floor(rand() * 100);
+    const late = !p.flexible && inMin > start + 10;
+    const early = !p.flexible && outMin < p.end;
+    const startDiff = inMin - start;
+    const endDiff = p.end - outMin;
     insert.run(
       s.id, day, toIso(day, inMin), officeLat, officeLng, Math.floor(10 + rand() * 80),
-      late ? 1 : 0, late ? inMin - 480 : 0,
+      late ? 1 : 0, late ? startDiff : 0,
       toIso(day, outMin), officeLat, officeLng, Math.floor(10 + rand() * 80),
-      early ? 1 : 0, early ? 1020 - outMin : 0,
+      early ? 1 : 0, early ? endDiff : 0,
     );
   }
+}
+
+// A forgotten check-out (Alice, last working day) and a fixed one with its audit trail (Eric).
+const lastDay = days[days.length - 1];
+const aliceDay = [...days].reverse().find((d) => staff.find((x) => x.id === byName.alice).pattern.days.includes(weekdayOf(d)) && d !== closureDay);
+db.prepare('UPDATE attendance SET check_out_at = NULL, check_out_lat = NULL, check_out_lng = NULL, check_out_distance = NULL, early = 0, early_minutes = 0 WHERE user_id = ? AND date = ?').run(byName.alice, aliceDay);
+const ericRec = db.prepare('SELECT * FROM attendance WHERE user_id = ? AND date = ?').get(byName.eric, lastDay);
+if (ericRec) {
+  const fixedOut = toIso(lastDay, 1035);
+  db.prepare("UPDATE attendance SET check_out_at = ?, early = 0, early_minutes = 0, source = 'edited' WHERE id = ?").run(fixedOut, ericRec.id);
+  db.prepare(
+    'INSERT INTO attendance_corrections (institution_id, attendance_id, changed_by, field, old_value, new_value, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(nga, ericRec.id, graceId, 'check_out', null, fixedOut, 'Phone died before checking out; confirmed with reception', nowIso);
 }
 
 // ---------------------------------------------------------------- sample branding for NGA

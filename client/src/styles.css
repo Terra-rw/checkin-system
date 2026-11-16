@@ -209,7 +209,8 @@ select {
   padding: 8px 10px;
   width: 100%;
 }
-input[type='checkbox'] {
+input[type='checkbox'],
+input[type='radio'] {
   width: auto;
 }
 .grid-form {
@@ -421,10 +422,14 @@ tr.dim td {
   opacity: 0.55;
 }
 td.actions {
-  display: flex;
-  gap: 6px;
-  justify-content: flex-end;
-  flex-wrap: wrap;
+  text-align: right;
+}
+td.actions > * + * {
+  margin-left: 6px;
+}
+td.actions > button {
+  margin-top: 2px;
+  margin-bottom: 2px;
 }
 td.actions button,
 td select {
@@ -1222,4 +1227,90 @@ td.actions {
 .tabs button,
 .topbar .user {
   white-space: nowrap;
+}
+
+/* ------------------------------------------------ contracts, time off, managers */
+
+.badge.blue {
+  background: #dbeafe;
+  color: var(--blue);
+}
+@media (prefers-color-scheme: dark) {
+  .badge.blue {
+    background: #1e3a8a55;
+    color: #93c5fd;
+  }
+}
+
+dialog.modal {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0;
+  background: var(--card);
+  color: var(--text);
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+}
+dialog.modal.wide {
+  width: min(720px, calc(100vw - 32px));
+}
+dialog.modal::backdrop {
+  background: rgb(15 23 42 / 0.45);
+}
+.modal-body {
+  padding: 20px;
+}
+
+.subtabs.wrap {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+input.search {
+  width: min(260px, 100%);
+}
+
+.schedule {
+  display: grid;
+  gap: 6px;
+}
+.schedule-row {
+  display: grid;
+  grid-template-columns: 90px 1fr auto 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.schedule-row.off {
+  color: var(--muted);
+}
+.schedule-row .muted.small {
+  grid-column: 2 / -1;
+}
+
+table.matrix td.cell,
+table.matrix th:not(:first-child) {
+  text-align: center;
+}
+table.matrix td.yes,
+table.matrix td.all {
+  color: var(--green);
+  font-weight: 600;
+}
+table.matrix td.team,
+table.matrix td.own {
+  color: var(--blue);
+  font-weight: 600;
+}
+table.matrix td.no {
+  color: var(--muted);
+}
+@media (prefers-color-scheme: dark) {
+  table.matrix td.team,
+  table.matrix td.own {
+    color: #93c5fd;
+  }
+}
+
+details summary {
+  cursor: pointer;
 }

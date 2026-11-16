@@ -2,18 +2,21 @@
 // - no login -> 401, an employee -> 403, an institution admin on platform routes -> 403
 // - an admin of institution B (and a support session for B) must never see or change
 //   institution A's people, devices, settings, branding, reports or security log.
-// The route list is read from index.js, so a new admin route without a test here fails the suite.
+// - managers' /team routes and employees' /time-off routes get the same treatment.
+// The route list is read from index.js and team.js, so a new route without a test here fails the suite.
 import fs from 'node:fs';
 import path from 'node:path';
 import { startServer, loginWithCode, reporter, makePng, kigaliDate, SERVER_DIR } from './helpers.mjs';
 
+const PREFIX = { admin: '/admin', platform: '/platform', team: '/team', mine: '/time-off' };
 function routeInventory() {
-  const src = fs.readFileSync(path.join(SERVER_DIR, 'index.js'), 'utf8');
+  const src = ['index.js', 'team.js'].map((f) => fs.readFileSync(path.join(SERVER_DIR, f), 'utf8')).join('\n');
   const routes = new Set();
-  for (const m of src.matchAll(/^\s*(admin|platform)\.(get|post|put|patch|delete)\(\s*[`'"]([^`'"]+)[`'"]/gm)) {
-    const [, router, method, p] = m;
+  for (const m of src.matchAll(/^\s*(admin|platform|team|mine)\.(get|post|put|patch|delete)\(\s*[`'"]([^`'"]+)[`'"]/gm)) {
+    const [, router, method, raw] = m;
+    const p = raw === '/' ? '' : raw;
     const paths = p.includes('${kind}') ? ['logo', 'photo'].map((k) => p.replace('${kind}', k)) : [p];
-    for (const one of paths) routes.add(`${method.toUpperCase()} /${router}${one}`);
+    for (const one of paths) routes.add(`${method.toUpperCase()} ${PREFIX[router]}${one}`);
   }
   return routes;
 }
@@ -48,15 +51,64 @@ export async function run() {
     const aWorkerId = aUsers.find((u) => u.email === 'worker@alpha.test').id;
     const aDeviceId = (await call('GET', '/admin/security', null, A)).data.devices[0]?.id;
     t.check('setup: alpha has data to protect', aWorkerId && aDeviceId && aLogo, JSON.stringify({ aWorkerId, aDeviceId, aLogo }));
+    // contract, holiday, time-off request and an attendance record in alpha
+    await call('PUT', `/admin/users/${aWorkerId}/terms`, { effectiveFrom: '2026-01-01', employmentType: 'part_time', contractHours: 20, contractPeriod: 'week', mode: 'flexible' }, A);
+    const aTermsCount = () => call('GET', `/admin/users/${aWorkerId}/terms`, null, A).then((x) => x.data.length);
+    const termsBefore = await aTermsCount();
+    const aHolidayId = (await call('POST', '/admin/holidays', { name: 'Alpha Founders Day', startDate: '2099-12-25' }, A)).data.id;
+    const aHolidays = () => call('GET', '/admin/holidays', null, A).then((x) => x.data);
+    const aReqId = (await call('POST', '/time-off', { type: 'personal', startDate: kigaliDate(30), reason: 'alpha family' }, aWorker.token)).data.request?.id;
+    const aReqStatus = async () => (await call('GET', '/team/time-off', null, A)).data.find((x) => x.id === aReqId)?.status;
+    const aRecordId = (await call('GET', `/team/attendance?from=${kigaliDate()}`, null, A)).data.rows.find((x) => x.user_id === aWorkerId)?.id;
+    t.check('setup: alpha contract, holiday, request, record', termsBefore === 1 && aHolidayId && aReqId && aRecordId, JSON.stringify({ termsBefore, aHolidayId, aReqId, aRecordId }));
     const alphaNames = /alpha/i;
     const leaks = (data) => alphaNames.test(JSON.stringify(data));
     const today = kigaliDate();
 
     // --- what B's admin tries on each admin route, and what must hold afterwards
     const adminCases = {
-      'GET /admin/attendance': async (tok) => {
-        const x = await call('GET', `/admin/attendance?from=${today}&to=${today}`, null, tok);
+      'GET /team/attendance': async (tok) => {
+        const x = await call('GET', `/team/attendance?from=${today}&to=${today}`, null, tok);
+        const range = await call('GET', `/team/attendance?from=${kigaliDate(-7)}&to=${today}`, null, tok);
+        return x.status === 200 && !leaks(x.data) && range.status === 200 && !leaks(range.data);
+      },
+      'GET /team/people': async (tok) => {
+        const x = await call('GET', '/team/people', null, tok);
         return x.status === 200 && !leaks(x.data);
+      },
+      'PATCH /team/attendance/:id': async (tok) =>
+        (await call('PATCH', `/team/attendance/${aRecordId}`, { checkIn: '00:01', reason: 'not yours' }, tok)).status === 404,
+      'GET /team/attendance/:id/history': async (tok) => (await call('GET', `/team/attendance/${aRecordId}/history`, null, tok)).status === 404,
+      'GET /team/time-off': async (tok) => {
+        const x = await call('GET', '/team/time-off', null, tok);
+        return x.status === 200 && !leaks(x.data);
+      },
+      'POST /team/time-off': async (tok) =>
+        (await call('POST', '/team/time-off', { userId: aWorkerId, type: 'sick', startDate: today }, tok)).status === 404,
+      'POST /team/time-off/:id/decide': async (tok) => {
+        const x = await call('POST', `/team/time-off/${aReqId}/decide`, { decision: 'approve' }, tok);
+        return x.status === 404 && (await aReqStatus()) === 'pending';
+      },
+      'POST /team/time-off/:id/cancel': async (tok) => {
+        const x = await call('POST', `/team/time-off/${aReqId}/cancel`, null, tok);
+        return x.status === 404 && (await aReqStatus()) === 'pending';
+      },
+      'GET /admin/users/:id/terms': async (tok) => (await call('GET', `/admin/users/${aWorkerId}/terms`, null, tok)).status === 404,
+      'PUT /admin/users/:id/terms': async (tok) => {
+        const x = await call('PUT', `/admin/users/${aWorkerId}/terms`, { effectiveFrom: '2026-02-01', employmentType: 'full_time', mode: 'institution' }, tok);
+        return x.status === 404 && (await aTermsCount()) === termsBefore;
+      },
+      'GET /admin/holidays': async (tok) => {
+        const x = await call('GET', '/admin/holidays', null, tok);
+        return x.status === 200 && !leaks(x.data);
+      },
+      'POST /admin/holidays': async (tok) => {
+        const x = await call('POST', '/admin/holidays', { name: 'Beta Day', startDate: '2099-06-01' }, tok);
+        return x.status === 201 && (await aHolidays()).length === 1;
+      },
+      'DELETE /admin/holidays/:id': async (tok) => {
+        const x = await call('DELETE', `/admin/holidays/${aHolidayId}`, null, tok);
+        return x.status === 404 && (await aHolidays()).length === 1;
       },
       'GET /admin/users': async (tok) => {
         const x = await call('GET', '/admin/users', null, tok);
@@ -96,15 +148,15 @@ export async function run() {
         await call('POST', '/admin/devices/forget-all', null, tok);
         return (await call('GET', '/admin/security', null, A)).data.devices.some((d) => d.id === aDeviceId);
       },
-      'GET /admin/reports': async (tok) => {
-        const all = await call('GET', `/admin/reports?type=daily&from=${today}&to=${today}`, null, tok);
-        const targeted = await call('GET', `/admin/reports?type=daily&from=${today}&to=${today}&userId=${aWorkerId}`, null, tok);
-        const file = await call('GET', `/admin/reports?type=daily&from=${today}&to=${today}&userId=${aWorkerId}&format=csv`, null, tok, true);
+      'GET /team/reports': async (tok) => {
+        const all = await call('GET', `/team/reports?type=daily&from=${today}&to=${today}`, null, tok);
+        const targeted = await call('GET', `/team/reports?type=daily&from=${today}&to=${today}&userId=${aWorkerId}`, null, tok);
+        const file = await call('GET', `/team/reports?type=daily&from=${today}&to=${today}&userId=${aWorkerId}&format=csv`, null, tok, true);
         return !leaks(all.data) && !leaks(targeted.data) && !/alpha/i.test(await file.text());
       },
-      'POST /admin/reports/email': async (tok) => {
+      'POST /team/reports/email': async (tok) => {
         const before = srv.log.length;
-        await call('POST', '/admin/reports/email', { type: 'daily', from: today, to: today, userId: aWorkerId, format: 'csv' }, tok);
+        await call('POST', '/team/reports/email', { type: 'daily', from: today, to: today, userId: aWorkerId, format: 'csv' }, tok);
         return !/To: [^\n]*alpha/i.test(srv.log.slice(before));
       },
       'GET /admin/branding': async (tok) => {
@@ -136,9 +188,30 @@ export async function run() {
 
     // A route the server defines but this file doesn't test is a failure.
     const inventory = routeInventory();
-    const adminRoutes = [...inventory].filter((k) => k.includes(' /admin/'));
+    const adminRoutes = [...inventory].filter((k) => k.includes(' /admin/') || k.includes(' /team/'));
     const untested = adminRoutes.filter((k) => !adminCases[k]);
-    t.check(`every admin route has an isolation test (${adminRoutes.length} routes)`, untested.length === 0, `untested: ${untested.join(', ')}`);
+    t.check(`every admin and team route has an isolation test (${adminRoutes.length} routes)`, untested.length === 0, `untested: ${untested.join(', ')}`);
+
+    // Employees' own time-off routes: login required, and only ever their own requests.
+    const mineRoutes = [...inventory].filter((k) => / \/time-off/.test(k));
+    const mineCases = {
+      'GET /time-off': async () => {
+        const x = await call('GET', '/time-off', null, bWorker);
+        return x.status === 200 && !leaks(x.data);
+      },
+      'POST /time-off': async () => {
+        const x = await call('POST', '/time-off', { type: 'sick', startDate: kigaliDate(40), userId: aWorkerId }, bWorker);
+        return x.status === 201 && x.data.request.name === 'Beta Worker';
+      },
+      'POST /time-off/:id/cancel': async () =>
+        (await call('POST', `/time-off/${aReqId}/cancel`, null, bWorker)).status === 404 && (await aReqStatus()) === 'pending',
+    };
+    t.check(`every employee time-off route has a test (${mineRoutes.length})`, mineRoutes.length >= 3 && mineRoutes.every((k) => mineCases[k]), mineRoutes.join(', '));
+    for (const key of mineRoutes) {
+      const [method, full] = key.split(' ');
+      const anon = await call(method, full.replace(':id', String(aReqId)), method === 'GET' ? undefined : {});
+      t.check(`${key}: no login 401, other institution can't reach alpha`, anon.status === 401 && (await mineCases[key]()), String(anon.status));
+    }
 
     // Unauthenticated and employee access to every admin route.
     for (const key of adminRoutes) {

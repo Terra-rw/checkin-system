@@ -1,6 +1,6 @@
 // Runs every end-to-end test file. Usage: npm test   (from server/ or the project root)
 // Each file starts its own server on a temporary database; nothing real is touched.
-const files = ['api.test.mjs', 'migration.test.mjs', 'tenant-isolation.test.mjs'];
+const files = ['schedule.test.mjs', 'api.test.mjs', 'contracts.test.mjs', 'migration.test.mjs', 'tenant-isolation.test.mjs'];
 const only = process.argv[2];
 
 let failures = 0;

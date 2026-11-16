@@ -45,6 +45,7 @@ export const publicUser = (u) => ({
   name: u.name,
   email: u.email,
   role: u.role,
+  managerId: u.manager_id ?? null,
   active: !!u.active,
   invitePending: !u.password_hash,
 });

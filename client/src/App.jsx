@@ -7,6 +7,7 @@ import SetPassword from './components/auth/SetPassword.jsx';
 import EmployeeView from './components/EmployeeView.jsx';
 import AdminView from './components/AdminView.jsx';
 import PlatformView from './components/PlatformView.jsx';
+import { MyTimeOff } from './components/TimeOff.jsx';
 import Logo from './components/Logo.jsx';
 
 export default function App() {
@@ -104,17 +105,31 @@ function ScopeApp({ scope }) {
 }
 
 function InstitutionApp({ scope, me, refresh, onLogout }) {
-  const isAdmin = me.user.role === 'admin';
-  const tabs = isAdmin
-    ? [
-        ...(me.support ? [] : [['me', 'My day']]),
-        ['attendance', 'Attendance'],
-        ['reports', 'Reports'],
-        ['employees', 'Employees'],
-        ['settings', 'Settings'],
-      ]
-    : [];
-  const [view, setView] = useState(tabs[0]?.[0] || 'me');
+  const role = me.user.role;
+  const timeOffLabel = me.pendingApprovals ? `Time off (${me.pendingApprovals})` : 'Time off';
+  const tabs =
+    role === 'admin'
+      ? [
+          ...(me.support ? [] : [['me', 'My day']]),
+          ['attendance', 'Attendance'],
+          ['timeoff', timeOffLabel],
+          ['reports', 'Reports'],
+          ['employees', 'Employees'],
+          ['settings', 'Settings'],
+        ]
+      : role === 'manager'
+        ? [
+            ['me', 'My day'],
+            ['attendance', 'My team'],
+            ['timeoff', timeOffLabel],
+            ['reports', 'Reports'],
+          ]
+        : [
+            ['me', 'My day'],
+            ['mytimeoff', 'Time off'],
+          ];
+  const [view, setView] = useState(tabs[0][0]);
+  const staff = role === 'admin' || role === 'manager';
 
   const exitSupport = () => {
     setSession(scope, null);
@@ -136,7 +151,13 @@ function InstitutionApp({ scope, me, refresh, onLogout }) {
           Support view: you are seeing {me.institution.name} as its admin. Everything you do is recorded in its security log.
         </div>
       )}
-      {view === 'me' || !isAdmin ? <EmployeeView me={me} onChange={refresh} /> : <AdminView me={me} tab={view} onBrandingSaved={refresh} />}
+      {view === 'me' ? (
+        <EmployeeView me={me} onChange={refresh} />
+      ) : view === 'mytimeoff' || !staff ? (
+        <MyTimeOff me={me} />
+      ) : (
+        <AdminView me={me} tab={view} onBrandingSaved={refresh} refresh={refresh} />
+      )}
     </Shell>
   );
 }

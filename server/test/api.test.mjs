@@ -78,19 +78,19 @@ export async function run() {
     // --- reports (built in the background worker)
     const today = kigaliDate();
     const weekAgo = kigaliDate(-6);
-    r = await call('GET', `/admin/reports?type=summary&from=${weekAgo}&to=${today}`, null, hr);
+    r = await call('GET', `/team/reports?type=summary&from=${weekAgo}&to=${today}`, null, hr);
     t.check('summary report json', r.status === 200 && r.data.rows.some((x) => x.name === 'Jane Uwase'), JSON.stringify(r.data).slice(0, 300));
-    r = await call('GET', `/admin/reports?type=daily&from=${today}&to=${today}`, null, hr);
+    r = await call('GET', `/team/reports?type=daily&from=${today}&to=${today}`, null, hr);
     t.check('daily report has absent rows', r.data.rows.some((x) => x.status === 'Absent'), JSON.stringify(r.data.rows));
     for (const fmt of ['csv', 'xlsx', 'pdf']) {
-      const res = await call('GET', `/admin/reports?type=daily&from=${weekAgo}&to=${today}&format=${fmt}`, null, hr, true);
+      const res = await call('GET', `/team/reports?type=daily&from=${weekAgo}&to=${today}&format=${fmt}`, null, hr, true);
       const buf = Buffer.from(await res.arrayBuffer());
       const magic = { csv: buf.toString('utf8', 0, 8).includes('Date'), xlsx: buf.toString('utf8', 0, 2) === 'PK', pdf: buf.toString('utf8', 0, 4) === '%PDF' }[fmt];
       t.check(`${fmt} download`, res.status === 200 && magic && /attachment/.test(res.headers.get('content-disposition')), res.status);
     }
-    r = await call('GET', `/admin/reports?type=summary&from=${today}&to=${weekAgo}`, null, hr);
+    r = await call('GET', `/team/reports?type=summary&from=${today}&to=${weekAgo}`, null, hr);
     t.check('backwards date range rejected', r.status === 400, JSON.stringify(r.data));
-    r = await call('POST', '/admin/reports/email', { type: 'summary', from: weekAgo, to: today, format: 'pdf' }, hr);
+    r = await call('POST', '/team/reports/email', { type: 'summary', from: weekAgo, to: today, format: 'pdf' }, hr);
     t.check('email report with attachment', r.status === 200 && /attachments: attendance-summary/.test(srv.log), JSON.stringify(r.data));
 
     // --- security page
@@ -147,7 +147,7 @@ export async function run() {
     r = await call('PATCH', '/admin/branding', { focusX: 300 }, hr);
     t.check('focus out of range rejected', r.status === 400, JSON.stringify(r.data));
     for (const fmt of ['pdf', 'xlsx']) {
-      const res = await call('GET', `/admin/reports?type=summary&from=${weekAgo}&to=${today}&format=${fmt}`, null, hr, true);
+      const res = await call('GET', `/team/reports?type=summary&from=${weekAgo}&to=${today}&format=${fmt}`, null, hr, true);
       const buf = Buffer.from(await res.arrayBuffer());
       t.check(`${fmt} includes logo`, res.status === 200 && (fmt === 'pdf' ? /\/Subtype \/Image/.test(buf.toString('latin1')) : buf.toString('latin1').includes('xl/media/')), res.status);
     }

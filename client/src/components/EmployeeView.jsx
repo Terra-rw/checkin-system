@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
-import { api, getPosition, formatTime, formatDate, formatDuration } from '../api.js';
+import { api, getPosition, formatTime, formatDate } from '../api.js';
 import { photoStyle } from './Logo.jsx';
+import { StatusBadges } from './ui.jsx';
+
+export { StatusBadges };
 
 function useClock(timeZone) {
   const [now, setNow] = useState(new Date());
@@ -12,16 +15,6 @@ function useClock(timeZone) {
     time: new Intl.DateTimeFormat(undefined, { timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now),
     date: new Intl.DateTimeFormat(undefined, { timeZone, weekday: 'long', day: 'numeric', month: 'long' }).format(now),
   };
-}
-
-export function StatusBadges({ r }) {
-  if (!r || !r.check_in_at) return <span className="badge red">Absent</span>;
-  return (
-    <>
-      {r.late ? <span className="badge amber">Late {formatDuration(r.late_minutes)}</span> : <span className="badge green">On time</span>}
-      {r.early ? <span className="badge amber">Left {formatDuration(r.early_minutes)} early</span> : null}
-    </>
-  );
 }
 
 export default function EmployeeView({ me, onChange }) {
@@ -68,8 +61,7 @@ export default function EmployeeView({ me, onChange }) {
           </>
         )}
         <div className="muted small">
-          {photo ? 'Work hours' : s.officeName} · {s.workStart}–{s.workEnd}
-          {!me.isWorkDay && ' · Not a scheduled work day'}
+          {photo ? 'Today' : s.officeName} · <PlanText plan={me.plan} s={s} />
         </div>
 
         {!s.officeConfigured ? (
@@ -106,8 +98,12 @@ export default function EmployeeView({ me, onChange }) {
           </div>
         </div>
         <p className="muted small">
-          You must be within {s.radiusMeters} m of the office. Check-ins after {s.workStart} (+{s.graceMinutes} min
-          grace) are reported as late.
+          You must be within {s.radiusMeters} m of the office.
+          {me.plan?.expected
+            ? ` Check-ins after ${me.plan.start} (+${s.graceMinutes} min grace) are reported as late.`
+            : me.plan?.flexible
+              ? ' Your hours are flexible: just check in and out so your time is counted.'
+              : " You're not expected today, so nothing is marked late. You can still check in if you work."}
         </p>
       </section>
 
@@ -144,4 +140,11 @@ export default function EmployeeView({ me, onChange }) {
       </section>
     </div>
   );
+}
+
+/** Today's plan in words: "08:00–17:00", "Day off", "Sick", "Holiday: …", "Flexible hours". */
+function PlanText({ plan, s }) {
+  if (!plan) return `${s.workStart}–${s.workEnd}`;
+  if (plan.reason === 'flexible') return plan.label === 'Flexible' ? 'Flexible hours' : plan.label;
+  return plan.label;
 }

@@ -13,7 +13,7 @@ async function handle(job) {
   const inst = db.prepare('SELECT * FROM institutions WHERE id = ?').get(job.instId);
   if (!inst) throw fail(404, 'Institution not found.');
   const report = buildReport(inst, getSettings(inst.id), job.query);
-  const summary = { title: report.title, period: report.period, workDayCount: report.workDayCount, stats: report.stats };
+  const summary = { title: report.title, period: report.period, workDayCount: report.workDayCount, stats: report.stats, warnings: report.warnings || [] };
 
   if (job.task === 'preview') {
     return {
